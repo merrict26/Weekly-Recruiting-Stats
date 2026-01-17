@@ -179,7 +179,7 @@ def get_onsites_this_week(opportunities, since_date):
 
 
 def get_candidate_details(opportunity, postings_map):
-    """Extract candidate name, role, and LinkedIn from an opportunity."""
+    """Extract candidate name, role, location, and LinkedIn from an opportunity."""
     name = opportunity.get("name", "Unknown")
     
     # Get LinkedIn URL from links
@@ -190,8 +190,9 @@ def get_candidate_details(opportunity, postings_map):
             linkedin_url = link
             break
     
-    # Get role from posting - try multiple possible locations
+    # Get role and location from posting - try multiple possible locations
     role = "Unknown Role"
+    location = ""
     posting_id = None
     
     # Try direct posting field
@@ -218,11 +219,14 @@ def get_candidate_details(opportunity, postings_map):
                 pass
     
     if posting_id and posting_id in postings_map:
-        role = postings_map[posting_id]
+        posting_info = postings_map[posting_id]
+        role = posting_info.get("title", "Unknown Role")
+        location = posting_info.get("location", "")
     
     return {
         "name": name,
         "role": role,
+        "location": location,
         "linkedin": linkedin_url,
     }
 
@@ -318,10 +322,11 @@ def format_slack_message(data):
         })
         onsite_text = ""
         for c in data["onsite_candidates"]:
+            location = f" ({c['location']})" if c.get("location") else ""
             if c["linkedin"]:
-                onsite_text += f"• <{c['linkedin']}|{c['name']}> — {c['role']}\n"
+                onsite_text += f"• <{c['linkedin']}|{c['name']}> — {c['role']}{location}\n"
             else:
-                onsite_text += f"• {c['name']} — {c['role']}\n"
+                onsite_text += f"• {c['name']} — {c['role']}{location}\n"
         blocks.append({
             "type": "section",
             "text": {
@@ -344,10 +349,11 @@ def format_slack_message(data):
         })
         final_text = ""
         for c in data["final_candidates"]:
+            location = f" ({c['location']})" if c.get("location") else ""
             if c["linkedin"]:
-                final_text += f"• <{c['linkedin']}|{c['name']}> — {c['role']}\n"
+                final_text += f"• <{c['linkedin']}|{c['name']}> — {c['role']}{location}\n"
             else:
-                final_text += f"• {c['name']} — {c['role']}\n"
+                final_text += f"• {c['name']} — {c['role']}{location}\n"
         blocks.append({
             "type": "section",
             "text": {
@@ -370,10 +376,11 @@ def format_slack_message(data):
         })
         offer_text = ""
         for c in data["offer_candidates"]:
+            location = f" ({c['location']})" if c.get("location") else ""
             if c["linkedin"]:
-                offer_text += f"• <{c['linkedin']}|{c['name']}> — {c['role']}\n"
+                offer_text += f"• <{c['linkedin']}|{c['name']}> — {c['role']}{location}\n"
             else:
-                offer_text += f"• {c['name']} — {c['role']}\n"
+                offer_text += f"• {c['name']} — {c['role']}{location}\n"
         blocks.append({
             "type": "section",
             "text": {
@@ -465,10 +472,13 @@ def main():
     new_candidates = get_candidates_added_since(opportunities, one_week_ago)
     onsites = get_onsites_this_week(opportunities, one_week_ago)
     
-    # Build postings map for role lookup
+    # Build postings map for role lookup (includes title and location)
     postings_map = {}
     for posting in postings:
-        postings_map[posting.get("id")] = posting.get("text", "Unknown Role")
+        postings_map[posting.get("id")] = {
+            "title": posting.get("text", "Unknown Role"),
+            "location": posting.get("categories", {}).get("location", ""),
+        }
     
     # Debug: check posting URL fields
     if postings:
