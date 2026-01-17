@@ -443,6 +443,23 @@ def format_slack_message(data):
         ]
     })
     
+    # Add referral button
+    blocks.append({
+        "type": "actions",
+        "elements": [
+            {
+                "type": "button",
+                "text": {
+                    "type": "plain_text",
+                    "text": "🎯 Refer a Candidate",
+                    "emoji": True
+                },
+                "url": "https://hire.lever.co/referrals/new",
+                "style": "primary"
+            }
+        ]
+    })
+    
     return {"blocks": blocks}
 
 
@@ -479,13 +496,6 @@ def main():
             "title": posting.get("text", "Unknown Role"),
             "location": posting.get("categories", {}).get("location", ""),
         }
-    
-    # Debug: check posting URL fields
-    if postings:
-        sample = postings[0]
-        print(f"DEBUG - Posting keys: {sample.keys()}")
-        print(f"DEBUG - hostedUrl: {sample.get('hostedUrl')}")
-        print(f"DEBUG - urls: {sample.get('urls')}")
     
     # Get detailed candidate info for onsite, final stages, and offer
     onsite_candidates = get_candidates_in_stages(opportunities, ONSITE_STAGE_IDS, postings_map)
