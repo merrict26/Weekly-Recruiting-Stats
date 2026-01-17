@@ -43,6 +43,15 @@ ONSITE_STAGE_IDS = [
     "cb7dd941-ed9f-4803-9ed5-158681732b65",
 ]
 
+# Offer stage ID
+OFFER_STAGE_ID = "offer"
+
+# Final stages IDs (Debrief + Reference check)
+FINAL_STAGE_IDS = [
+    "359f9594-ada0-4ca2-bec2-8b3f7eb2106a",
+    "d03862a2-e446-4ade-bee6-4b200cf9b399",
+]
+
 
 def lever_request(endpoint, params=None):
     """Make authenticated request to Lever API."""
@@ -168,6 +177,41 @@ def get_onsites_this_week(opportunities, since_date):
     return count
 
 
+def get_candidate_details(opportunity, postings_map):
+    """Extract candidate name, role, and LinkedIn from an opportunity."""
+    name = opportunity.get("name", "Unknown")
+    
+    # Get LinkedIn URL from links
+    linkedin_url = None
+    links = opportunity.get("links", [])
+    for link in links:
+        if isinstance(link, str) and "linkedin.com" in link:
+            linkedin_url = link
+            break
+    
+    # Get role from posting
+    role = "Unknown Role"
+    posting_id = opportunity.get("posting")
+    if posting_id and posting_id in postings_map:
+        role = postings_map[posting_id]
+    
+    return {
+        "name": name,
+        "role": role,
+        "linkedin": linkedin_url,
+    }
+
+
+def get_candidates_in_stages(opportunities, stage_ids, postings_map):
+    """Get list of candidates currently in specified stages."""
+    candidates = []
+    for opp in opportunities:
+        stage = get_stage_id(opp)
+        if stage in stage_ids:
+            candidates.append(get_candidate_details(opp, postings_map))
+    return candidates
+
+
 def format_slack_message(data):
     """Format the digest as a Slack message with blocks."""
     # Get Monday of the current week
@@ -232,6 +276,84 @@ def format_slack_message(data):
             "text": {
                 "type": "mrkdwn",
                 "text": f"🎯 *{data['by_group']['Offer']} offer(s) currently out!*"
+            }
+        })
+    
+    # Show candidates in Onsite stages
+    if data.get("onsite_candidates"):
+        blocks.append({
+            "type": "divider"
+        })
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "*🏢 Candidates in Onsite*"
+            }
+        })
+        onsite_text = ""
+        for c in data["onsite_candidates"]:
+            if c["linkedin"]:
+                onsite_text += f"• <{c['linkedin']}|{c['name']}> — {c['role']}\n"
+            else:
+                onsite_text += f"• {c['name']} — {c['role']}\n"
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": onsite_text
+            }
+        })
+    
+    # Show candidates in Final Stages (Debrief + Reference check)
+    if data.get("final_candidates"):
+        blocks.append({
+            "type": "divider"
+        })
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "*📋 Candidates in Final Stages*"
+            }
+        })
+        final_text = ""
+        for c in data["final_candidates"]:
+            if c["linkedin"]:
+                final_text += f"• <{c['linkedin']}|{c['name']}> — {c['role']}\n"
+            else:
+                final_text += f"• {c['name']} — {c['role']}\n"
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": final_text
+            }
+        })
+    
+    # Show candidates with Offers
+    if data.get("offer_candidates"):
+        blocks.append({
+            "type": "divider"
+        })
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "*🎉 Candidates with Offers*"
+            }
+        })
+        offer_text = ""
+        for c in data["offer_candidates"]:
+            if c["linkedin"]:
+                offer_text += f"• <{c['linkedin']}|{c['name']}> — {c['role']}\n"
+            else:
+                offer_text += f"• {c['name']} — {c['role']}\n"
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": offer_text
             }
         })
     
@@ -314,6 +436,16 @@ def main():
     print(f"Raw stage counts: {dict(stage_counts)}")
     print(f"Grouped counts: {grouped_counts}")
     
+    # Build postings map for role lookup
+    postings_map = {}
+    for posting in postings:
+        postings_map[posting.get("id")] = posting.get("text", "Unknown Role")
+    
+    # Get detailed candidate info for onsite, final stages, and offer
+    onsite_candidates = get_candidates_in_stages(opportunities, ONSITE_STAGE_IDS, postings_map)
+    final_candidates = get_candidates_in_stages(opportunities, FINAL_STAGE_IDS, postings_map)
+    offer_candidates = get_candidates_in_stages(opportunities, [OFFER_STAGE_ID], postings_map)
+    
     # Count candidates per role (by posting ID)
     # Note: Each opportunity may have multiple applications to different postings
     candidates_per_role = defaultdict(int)
@@ -353,9 +485,12 @@ def main():
         "new_candidates": new_candidates,
         "onsites": onsites,
         "by_group": grouped_counts,
-        "total_active": len(opportunities),
+        "total_active": sum(grouped_counts.values()),  # Only count candidates in tracked stages
         "open_positions": open_positions,
         "candidates_per_role": candidates_per_role,
+        "onsite_candidates": onsite_candidates,
+        "final_candidates": final_candidates,
+        "offer_candidates": offer_candidates,
     }
     
     print(f"New candidates this week: {new_candidates}")
