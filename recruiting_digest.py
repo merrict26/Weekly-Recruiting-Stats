@@ -253,7 +253,7 @@ def format_slack_message(data):
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": f"📊 Recruiting Digest — Week of {week_of}",
+                "text": f"Week of {week_of}",
                 "emoji": True
             }
         },
@@ -433,12 +433,29 @@ def format_slack_message(data):
         "type": "divider"
     })
     
+    # Refer a candidate button
+    blocks.append({
+        "type": "actions",
+        "elements": [
+            {
+                "type": "button",
+                "text": {
+                    "type": "plain_text",
+                    "text": "🎯 Refer a Candidate",
+                    "emoji": True
+                },
+                "url": "https://hire.lever.co/referrals/new",
+                "style": "primary"
+            }
+        ]
+    })
+    
     blocks.append({
         "type": "context",
         "elements": [
             {
                 "type": "mrkdwn",
-                "text": f"<https://hire.lever.co/referrals/new|🎯 Refer a Candidate> • Total active candidates: {data['total_active']}"
+                "text": f"Total active candidates: {data['total_active']}"
             }
         ]
     })
