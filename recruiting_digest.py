@@ -13,19 +13,35 @@ from collections import defaultdict
 LEVER_API_KEY = os.environ["LEVER_API_KEY"]
 SLACK_WEBHOOK_URL = os.environ["SLACK_WEBHOOK_URL"]
 
-# Lever pipeline stages (must match exactly)
+# Lever pipeline stages by ID (more reliable than names)
 STAGE_GROUPS = {
-    "Hiring Manager Review": ["Hiring Manager Review"],
-    "Intro": ["Schedule Intro Call", "Introductory Call"],
-    "Technical": ["Schedule Technical Interview", "Technical Interview", 
-                  "Schedule Technical Interview #2", "Technical Interview (#2)"],
-    "Onsite": ["Schedule Onsite", "Onsite interview"],
-    "Final Stages": ["Debrief", "Reference check"],
-    "Offer": ["Offer"],
+    "Hiring Manager Review": ["3b5d887e-0629-4ceb-973a-663952c97b21"],
+    "Intro": [
+        "94d7f5df-ec0f-4061-b54d-bea369ace17b",  # Schedule Intro Call
+        "fb6d2f07-aeab-4f1c-bf35-72f0cffa37f2",  # Introductory Call
+    ],
+    "Technical": [
+        "160000bb-2cba-40df-b9f0-f69c77cd6175",  # Schedule Technical Interview
+        "fae3d918-0118-4f17-b206-f7f29dca3bec",  # Technical Interview
+        "7ce6a4ba-c34e-4582-be77-dac4b1cf2fe3",  # Schedule Technical Interview #2
+        "a57980a4-4fc4-4252-a0f2-e765e96cfee5",  # Technical Interview (#2)
+    ],
+    "Onsite": [
+        "af0f3cb5-4bec-4fbe-8360-f30e9d0c7272",  # Schedule Onsite
+        "cb7dd941-ed9f-4803-9ed5-158681732b65",  # Onsite interview
+    ],
+    "Final Stages": [
+        "359f9594-ada0-4ca2-bec2-8b3f7eb2106a",  # Debrief
+        "d03862a2-e446-4ade-bee6-4b200cf9b399",  # Reference check
+    ],
+    "Offer": ["offer"],
 }
 
-# All stages flattened (for lookups)
-ALL_STAGES = [stage for stages in STAGE_GROUPS.values() for stage in stages]
+# Onsite stage IDs (for "candidates in onsite stages" metric)
+ONSITE_STAGE_IDS = [
+    "af0f3cb5-4bec-4fbe-8360-f30e9d0c7272",
+    "cb7dd941-ed9f-4803-9ed5-158681732b65",
+]
 
 
 def lever_request(endpoint, params=None):
@@ -83,8 +99,8 @@ def get_open_postings():
     return postings
 
 
-def get_stage_name(opportunity):
-    """Extract current stage name from opportunity."""
+def get_stage_id(opportunity):
+    """Extract current stage ID from opportunity."""
     stage = opportunity.get("stage")
     if stage:
         return stage
@@ -105,7 +121,7 @@ def count_by_stage(opportunities):
     """Count candidates in each stage."""
     counts = defaultdict(int)
     for opp in opportunities:
-        stage = get_stage_name(opp)
+        stage = get_stage_id(opp)
         counts[stage] += 1
     return counts
 
@@ -144,11 +160,10 @@ def get_interviews_this_week(since_date):
 
 def get_onsites_this_week(opportunities, since_date):
     """Count candidates currently in onsite stages."""
-    onsite_stages = STAGE_GROUPS.get("Onsite", [])
     count = 0
     for opp in opportunities:
-        stage = get_stage_name(opp)
-        if stage in onsite_stages:
+        stage = get_stage_id(opp)
+        if stage in ONSITE_STAGE_IDS:
             count += 1
     return count
 
@@ -238,10 +253,11 @@ def format_slack_message(data):
         roles_text = ""
         for role in data["open_positions"]:
             candidate_count = data["candidates_per_role"].get(role["id"], 0)
+            location = f" ({role['location']})" if role.get("location") else ""
             if candidate_count > 0:
-                roles_text += f"• {role['title']} — _{candidate_count} candidates_\n"
+                roles_text += f"• {role['title']}{location} — _{candidate_count} candidates_\n"
             else:
-                roles_text += f"• {role['title']}\n"
+                roles_text += f"• {role['title']}{location}\n"
         
         blocks.append({
             "type": "section",
@@ -294,6 +310,10 @@ def main():
     new_candidates = get_candidates_added_since(opportunities, one_week_ago)
     onsites = get_onsites_this_week(opportunities, one_week_ago)
     
+    # Debug: print raw stage counts
+    print(f"Raw stage counts: {dict(stage_counts)}")
+    print(f"Grouped counts: {grouped_counts}")
+    
     # Count candidates per role (by posting ID)
     # Note: Each opportunity may have multiple applications to different postings
     candidates_per_role = defaultdict(int)
@@ -319,9 +339,11 @@ def main():
     # Format postings for display
     open_positions = []
     for posting in postings:
+        location = posting.get("categories", {}).get("location", "")
         open_positions.append({
             "id": posting.get("id"),
             "title": posting.get("text", "Unknown Role"),
+            "location": location,
         })
     
     # Sort alphabetically by title
