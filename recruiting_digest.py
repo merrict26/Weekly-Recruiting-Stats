@@ -402,10 +402,17 @@ def format_slack_message(data):
             for role in roles:
                 location = f" ({role['location']})" if role.get("location") else ""
                 candidate_count = data["candidates_per_role"].get(role["id"], 0)
-                if candidate_count > 0:
-                    group_text += f"    • {role['title']}{location} — _{candidate_count} candidates_\n"
+                
+                # Link title to job posting if URL available
+                if role.get("url"):
+                    title_text = f"<{role['url']}|{role['title']}>"
                 else:
-                    group_text += f"    • {role['title']}{location}\n"
+                    title_text = role['title']
+                
+                if candidate_count > 0:
+                    group_text += f"    • {title_text}{location} — _{candidate_count} candidates_\n"
+                else:
+                    group_text += f"    • {title_text}{location}\n"
             
             blocks.append({
                 "type": "section",
@@ -458,18 +465,17 @@ def main():
     new_candidates = get_candidates_added_since(opportunities, one_week_ago)
     onsites = get_onsites_this_week(opportunities, one_week_ago)
     
-    # Debug: print raw stage counts
-    print(f"Raw stage counts: {dict(stage_counts)}")
-    print(f"Grouped counts: {grouped_counts}")
-    
     # Build postings map for role lookup
     postings_map = {}
     for posting in postings:
         postings_map[posting.get("id")] = posting.get("text", "Unknown Role")
     
-    # Debug: show categories to verify grouping
+    # Debug: check posting URL fields
     if postings:
-        print(f"DEBUG - Sample posting categories: {postings[0].get('categories')}")
+        sample = postings[0]
+        print(f"DEBUG - Posting keys: {sample.keys()}")
+        print(f"DEBUG - hostedUrl: {sample.get('hostedUrl')}")
+        print(f"DEBUG - urls: {sample.get('urls')}")
     
     # Get detailed candidate info for onsite, final stages, and offer
     onsite_candidates = get_candidates_in_stages(opportunities, ONSITE_STAGE_IDS, postings_map)
@@ -505,6 +511,9 @@ def main():
         department = posting.get("categories", {}).get("department", "")
         team = posting.get("categories", {}).get("team", "")
         
+        # Get the job posting URL
+        posting_url = posting.get("hostedUrl") or posting.get("urls", {}).get("show", "")
+        
         # Use team if available, otherwise department, otherwise "Other"
         group = team or department or "Other"
         
@@ -512,6 +521,7 @@ def main():
             "id": posting.get("id"),
             "title": posting.get("text", "Unknown Role"),
             "location": location,
+            "url": posting_url,
         })
     
     # Sort positions within each group
@@ -525,7 +535,7 @@ def main():
         "new_candidates": new_candidates,
         "onsites": onsites,
         "by_group": grouped_counts,
-        "total_active": sum(grouped_counts.values()),  # Only count candidates in tracked stages
+        "total_active": sum(grouped_counts.values()),
         "open_positions_grouped": open_positions_grouped,
         "total_open_positions": len(postings),
         "candidates_per_role": candidates_per_role,
@@ -533,9 +543,6 @@ def main():
         "final_candidates": final_candidates,
         "offer_candidates": offer_candidates,
     }
-    
-    print(f"New candidates this week: {new_candidates}")
-    print(f"Pipeline: {grouped_counts}")
     
     # Format and send
     message = format_slack_message(data)
