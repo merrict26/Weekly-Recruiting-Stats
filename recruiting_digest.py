@@ -217,9 +217,6 @@ def get_candidate_details(opportunity, postings_map):
                 # Application is just an ID, not expanded
                 pass
     
-    # Debug: print what we found
-    print(f"DEBUG - Candidate: {name}, posting_id: {posting_id}, found in map: {posting_id in postings_map if posting_id else False}")
-    
     if posting_id and posting_id in postings_map:
         role = postings_map[posting_id]
     
@@ -394,28 +391,29 @@ def format_slack_message(data):
         "type": "section",
         "text": {
             "type": "mrkdwn",
-            "text": f"*Open Positions ({len(data['open_positions'])})*"
+            "text": f"*Open Positions ({data['total_open_positions']})*"
         }
     })
     
-    # List open roles (with candidate counts if available)
-    if data["open_positions"]:
-        roles_text = ""
-        for role in data["open_positions"]:
-            candidate_count = data["candidates_per_role"].get(role["id"], 0)
-            location = f" ({role['location']})" if role.get("location") else ""
-            if candidate_count > 0:
-                roles_text += f"• {role['title']}{location} — _{candidate_count} candidates_\n"
-            else:
-                roles_text += f"• {role['title']}{location}\n"
-        
-        blocks.append({
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": roles_text
-            }
-        })
+    # List open roles grouped by department/team
+    if data["open_positions_grouped"]:
+        for group_name, roles in data["open_positions_grouped"].items():
+            group_text = f"*{group_name}*\n"
+            for role in roles:
+                location = f" ({role['location']})" if role.get("location") else ""
+                candidate_count = data["candidates_per_role"].get(role["id"], 0)
+                if candidate_count > 0:
+                    group_text += f"    • {role['title']}{location} — _{candidate_count} candidates_\n"
+                else:
+                    group_text += f"    • {role['title']}{location}\n"
+            
+            blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": group_text
+                }
+            })
     
     blocks.append({
         "type": "divider"
@@ -469,21 +467,9 @@ def main():
     for posting in postings:
         postings_map[posting.get("id")] = posting.get("text", "Unknown Role")
     
-    print(f"DEBUG - Postings map: {postings_map}")
-    
-    # Debug: print first opportunity structure to see where posting info is
-    if opportunities:
-        sample = opportunities[0]
-        print(f"DEBUG - Sample opportunity keys: {sample.keys()}")
-        print(f"DEBUG - Sample posting field: {sample.get('posting')}")
-        apps = sample.get('applications', [])
-        print(f"DEBUG - Sample applications count: {len(apps)}")
-        if apps:
-            first_app = apps[0]
-            print(f"DEBUG - First application type: {type(first_app)}")
-            if isinstance(first_app, dict):
-                print(f"DEBUG - First application keys: {first_app.keys()}")
-                print(f"DEBUG - First application posting: {first_app.get('posting')}")
+    # Debug: show categories to verify grouping
+    if postings:
+        print(f"DEBUG - Sample posting categories: {postings[0].get('categories')}")
     
     # Get detailed candidate info for onsite, final stages, and offer
     onsite_candidates = get_candidates_in_stages(opportunities, ONSITE_STAGE_IDS, postings_map)
@@ -512,25 +498,36 @@ def main():
         if posting_id:
             candidates_per_role[posting_id] += 1
     
-    # Format postings for display
-    open_positions = []
+    # Format postings for display, grouped by department
+    open_positions_by_dept = defaultdict(list)
     for posting in postings:
         location = posting.get("categories", {}).get("location", "")
-        open_positions.append({
+        department = posting.get("categories", {}).get("department", "")
+        team = posting.get("categories", {}).get("team", "")
+        
+        # Use team if available, otherwise department, otherwise "Other"
+        group = team or department or "Other"
+        
+        open_positions_by_dept[group].append({
             "id": posting.get("id"),
             "title": posting.get("text", "Unknown Role"),
             "location": location,
         })
     
-    # Sort alphabetically by title
-    open_positions.sort(key=lambda x: x["title"])
+    # Sort positions within each group
+    for group in open_positions_by_dept:
+        open_positions_by_dept[group].sort(key=lambda x: x["title"])
+    
+    # Convert to regular dict and sort groups alphabetically
+    open_positions_grouped = dict(sorted(open_positions_by_dept.items()))
     
     data = {
         "new_candidates": new_candidates,
         "onsites": onsites,
         "by_group": grouped_counts,
         "total_active": sum(grouped_counts.values()),  # Only count candidates in tracked stages
-        "open_positions": open_positions,
+        "open_positions_grouped": open_positions_grouped,
+        "total_open_positions": len(postings),
         "candidates_per_role": candidates_per_role,
         "onsite_candidates": onsite_candidates,
         "final_candidates": final_candidates,
