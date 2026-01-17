@@ -189,9 +189,25 @@ def get_candidate_details(opportunity, postings_map):
             linkedin_url = link
             break
     
-    # Get role from posting
+    # Get role from posting - try multiple possible locations
     role = "Unknown Role"
-    posting_id = opportunity.get("posting")
+    posting_id = None
+    
+    # Try direct posting field
+    if opportunity.get("posting"):
+        posting_id = opportunity.get("posting")
+    
+    # Try applications array
+    if not posting_id:
+        applications = opportunity.get("applications", [])
+        if applications:
+            first_app = applications[0]
+            if isinstance(first_app, dict):
+                posting_id = first_app.get("posting") or first_app.get("postingId")
+    
+    # Debug: print what we found
+    print(f"DEBUG - Candidate: {name}, posting_id: {posting_id}, found in map: {posting_id in postings_map if posting_id else False}")
+    
     if posting_id and posting_id in postings_map:
         role = postings_map[posting_id]
     
@@ -440,6 +456,15 @@ def main():
     postings_map = {}
     for posting in postings:
         postings_map[posting.get("id")] = posting.get("text", "Unknown Role")
+    
+    print(f"DEBUG - Postings map: {postings_map}")
+    
+    # Debug: print first opportunity structure to see where posting info is
+    if opportunities:
+        sample = opportunities[0]
+        print(f"DEBUG - Sample opportunity keys: {sample.keys()}")
+        print(f"DEBUG - Sample posting field: {sample.get('posting')}")
+        print(f"DEBUG - Sample applications: {sample.get('applications')}")
     
     # Get detailed candidate info for onsite, final stages, and offer
     onsite_candidates = get_candidates_in_stages(opportunities, ONSITE_STAGE_IDS, postings_map)
