@@ -13,13 +13,14 @@ from collections import defaultdict
 LEVER_API_KEY = os.environ["LEVER_API_KEY"]
 SLACK_WEBHOOK_URL = os.environ["SLACK_WEBHOOK_URL"]
 
-# Lever pipeline stages (update if yours differ)
+# Lever pipeline stages (must match exactly)
 STAGE_GROUPS = {
-    "Top of Funnel": ["Schedule Intro Call", "Introductory Call"],
+    "Hiring Manager Review": ["Hiring Manager Review"],
+    "Intro": ["Schedule Intro Call", "Introductory Call"],
     "Technical": ["Schedule Technical Interview", "Technical Interview", 
                   "Schedule Technical Interview #2", "Technical Interview (#2)"],
-    "Onsite": ["Schedule Onsite", "Onsite Interview"],
-    "Final Stages": ["Debrief", "Reference Check"],
+    "Onsite": ["Schedule Onsite", "Onsite interview"],
+    "Final Stages": ["Debrief", "Reference check"],
     "Offer": ["Offer"],
 }
 
@@ -40,13 +41,16 @@ def lever_request(endpoint, params=None):
 
 
 def get_all_opportunities():
-    """Fetch all active opportunities (candidates) from Lever."""
+    """Fetch all active (non-archived) opportunities from Lever."""
     opportunities = []
     has_next = True
     offset = None
     
     while has_next:
-        params = {"limit": 100}
+        params = {
+            "limit": 100,
+            "archived": "false"  # Only get active candidates
+        }
         if offset:
             params["offset"] = offset
         
@@ -151,7 +155,10 @@ def get_onsites_this_week(opportunities, since_date):
 
 def format_slack_message(data):
     """Format the digest as a Slack message with blocks."""
-    week_of = datetime.now().strftime("%B %d, %Y")
+    # Get Monday of the current week
+    today = datetime.now()
+    monday = today - timedelta(days=today.weekday())
+    week_of = monday.strftime("%B %d, %Y")
     
     blocks = [
         {
@@ -186,7 +193,8 @@ def format_slack_message(data):
     for group_name in STAGE_GROUPS.keys():
         count = data["by_group"].get(group_name, 0)
         emoji = {
-            "Top of Funnel": "🔝",
+            "Hiring Manager Review": "👀",
+            "Intro": "📞",
             "Technical": "💻",
             "Onsite": "🏢",
             "Final Stages": "📋",
