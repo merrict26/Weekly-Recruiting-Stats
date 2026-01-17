@@ -74,7 +74,8 @@ def get_all_opportunities():
     while has_next:
         params = {
             "limit": 100,
-            "archived": "false"  # Only get active candidates
+            "archived": "false",  # Only get active candidates
+            "expand": "applications",  # Include application data with posting info
         }
         if offset:
             params["offset"] = offset
@@ -197,13 +198,24 @@ def get_candidate_details(opportunity, postings_map):
     if opportunity.get("posting"):
         posting_id = opportunity.get("posting")
     
-    # Try applications array
+    # Try applications array (expanded format)
     if not posting_id:
         applications = opportunity.get("applications", [])
         if applications:
             first_app = applications[0]
             if isinstance(first_app, dict):
-                posting_id = first_app.get("posting") or first_app.get("postingId")
+                # Could be nested posting object or just posting ID
+                posting_data = first_app.get("posting")
+                if isinstance(posting_data, dict):
+                    posting_id = posting_data.get("id")
+                elif isinstance(posting_data, str):
+                    posting_id = posting_data
+                # Also try postingId field
+                if not posting_id:
+                    posting_id = first_app.get("postingId")
+            elif isinstance(first_app, str):
+                # Application is just an ID, not expanded
+                pass
     
     # Debug: print what we found
     print(f"DEBUG - Candidate: {name}, posting_id: {posting_id}, found in map: {posting_id in postings_map if posting_id else False}")
@@ -464,7 +476,14 @@ def main():
         sample = opportunities[0]
         print(f"DEBUG - Sample opportunity keys: {sample.keys()}")
         print(f"DEBUG - Sample posting field: {sample.get('posting')}")
-        print(f"DEBUG - Sample applications: {sample.get('applications')}")
+        apps = sample.get('applications', [])
+        print(f"DEBUG - Sample applications count: {len(apps)}")
+        if apps:
+            first_app = apps[0]
+            print(f"DEBUG - First application type: {type(first_app)}")
+            if isinstance(first_app, dict):
+                print(f"DEBUG - First application keys: {first_app.keys()}")
+                print(f"DEBUG - First application posting: {first_app.get('posting')}")
     
     # Get detailed candidate info for onsite, final stages, and offer
     onsite_candidates = get_candidates_in_stages(opportunities, ONSITE_STAGE_IDS, postings_map)
