@@ -59,6 +59,26 @@ def get_all_opportunities():
     return opportunities
 
 
+def get_open_postings():
+    """Fetch all published (open) job postings from Lever."""
+    postings = []
+    has_next = True
+    offset = None
+    
+    while has_next:
+        params = {"state": "published", "limit": 100}
+        if offset:
+            params["offset"] = offset
+        
+        result = lever_request("postings", params)
+        postings.extend(result.get("data", []))
+        
+        has_next = result.get("hasNext", False)
+        offset = result.get("next")
+    
+    return postings
+
+
 def get_stage_name(opportunity):
     """Extract current stage name from opportunity."""
     stage = opportunity.get("stage")
@@ -196,12 +216,43 @@ def format_slack_message(data):
         "type": "divider"
     })
     
+    # Open positions section
+    blocks.append({
+        "type": "section",
+        "text": {
+            "type": "mrkdwn",
+            "text": f"*Open Positions ({len(data['open_positions'])})*"
+        }
+    })
+    
+    # List open roles (with candidate counts if available)
+    if data["open_positions"]:
+        roles_text = ""
+        for role in data["open_positions"]:
+            candidate_count = data["candidates_per_role"].get(role["id"], 0)
+            if candidate_count > 0:
+                roles_text += f"• {role['title']} — _{candidate_count} candidates_\n"
+            else:
+                roles_text += f"• {role['title']}\n"
+        
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": roles_text
+            }
+        })
+    
+    blocks.append({
+        "type": "divider"
+    })
+    
     blocks.append({
         "type": "context",
         "elements": [
             {
                 "type": "mrkdwn",
-                "text": f"Total active candidates: {data['total_active']} across {data['open_roles']} open roles"
+                "text": f"Total active candidates: {data['total_active']}"
             }
         ]
     })
@@ -223,6 +274,10 @@ def main():
     opportunities = get_all_opportunities()
     print(f"Found {len(opportunities)} active candidates")
     
+    # Get open postings
+    postings = get_open_postings()
+    print(f"Found {len(postings)} open positions")
+    
     # Calculate metrics
     one_week_ago = datetime.now() - timedelta(days=7)
     
@@ -231,19 +286,33 @@ def main():
     new_candidates = get_candidates_added_since(opportunities, one_week_ago)
     onsites = get_onsites_this_week(opportunities, one_week_ago)
     
-    # Get unique posting count (open roles)
-    roles = set()
+    # Count candidates per role (by posting ID)
+    candidates_per_role = defaultdict(int)
     for opp in opportunities:
-        role = get_posting_title(opp)
-        if role != "Unknown Role":
-            roles.add(role)
+        applications = opp.get("applications", [])
+        for app in applications:
+            posting_id = app.get("posting")
+            if posting_id:
+                candidates_per_role[posting_id] += 1
+    
+    # Format postings for display
+    open_positions = []
+    for posting in postings:
+        open_positions.append({
+            "id": posting.get("id"),
+            "title": posting.get("text", "Unknown Role"),
+        })
+    
+    # Sort alphabetically by title
+    open_positions.sort(key=lambda x: x["title"])
     
     data = {
         "new_candidates": new_candidates,
         "onsites": onsites,
         "by_group": grouped_counts,
         "total_active": len(opportunities),
-        "open_roles": len(roles) if roles else 10,  # fallback to 10 if can't determine
+        "open_positions": open_positions,
+        "candidates_per_role": candidates_per_role,
     }
     
     print(f"New candidates this week: {new_candidates}")
