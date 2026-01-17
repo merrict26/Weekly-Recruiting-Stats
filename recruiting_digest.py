@@ -438,24 +438,7 @@ def format_slack_message(data):
         "elements": [
             {
                 "type": "mrkdwn",
-                "text": f"Total active candidates: {data['total_active']}"
-            }
-        ]
-    })
-    
-    # Add referral button
-    blocks.append({
-        "type": "actions",
-        "elements": [
-            {
-                "type": "button",
-                "text": {
-                    "type": "plain_text",
-                    "text": "🎯 Refer a Candidate",
-                    "emoji": True
-                },
-                "url": "https://hire.lever.co/referrals/new",
-                "style": "primary"
+                "text": f"<https://hire.lever.co/referrals/new|🎯 Refer a Candidate> • Total active candidates: {data['total_active']}"
             }
         ]
     })
