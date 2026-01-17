@@ -287,13 +287,26 @@ def main():
     onsites = get_onsites_this_week(opportunities, one_week_ago)
     
     # Count candidates per role (by posting ID)
+    # Note: Each opportunity may have multiple applications to different postings
     candidates_per_role = defaultdict(int)
     for opp in opportunities:
+        # Try to get posting from different possible locations in the API response
+        posting_id = None
+        
+        # Check if there's a direct posting field (some Lever API versions)
+        if opp.get("posting"):
+            posting_id = opp.get("posting")
+        
+        # Check applications - could be list of IDs or list of objects
         applications = opp.get("applications", [])
-        for app in applications:
-            posting_id = app.get("posting")
-            if posting_id:
-                candidates_per_role[posting_id] += 1
+        if applications:
+            first_app = applications[0]
+            if isinstance(first_app, dict):
+                posting_id = first_app.get("posting") or first_app.get("postingId")
+            # If it's a string, it's an application ID, not a posting ID
+        
+        if posting_id:
+            candidates_per_role[posting_id] += 1
     
     # Format postings for display
     open_positions = []
