@@ -60,6 +60,40 @@ def lever_request(endpoint, params=None):
     return response.json()
 
 
+def get_upcoming_interview(opportunity_id):
+    """Get the next upcoming interview for a candidate."""
+    try:
+        result = lever_request(f"opportunities/{opportunity_id}/interviews")
+        interviews = result.get("data", [])
+        
+        now = datetime.now()
+        upcoming = []
+        
+        for interview in interviews:
+            # Get interview date
+            date_ms = interview.get("date")
+            if date_ms:
+                interview_date = datetime.fromtimestamp(date_ms / 1000)
+                # Only include future interviews
+                if interview_date > now:
+                    upcoming.append({
+                        "date": interview_date,
+                        "subject": interview.get("subject", "Interview"),
+                    })
+        
+        if upcoming:
+            # Sort by date and return the soonest
+            upcoming.sort(key=lambda x: x["date"])
+            next_interview = upcoming[0]
+            # Format: "Jan 20, 10:00 AM"
+            return next_interview["date"].strftime("%b %d, %I:%M %p")
+        
+        return None
+    except Exception as e:
+        print(f"Error fetching interviews for {opportunity_id}: {e}")
+        return None
+
+
 def get_all_opportunities():
     """Fetch all active (non-archived) opportunities from Lever."""
     opportunities = []
@@ -119,10 +153,14 @@ def get_stage_name(stage_id):
 
 
 def get_candidate_details(opportunity, postings_map):
-    """Extract candidate name, role, location, and stage."""
+    """Extract candidate name, role, location, stage, and interview info."""
     name = opportunity.get("name", "Unknown")
+    opp_id = opportunity.get("id")
     stage_id = opportunity.get("stage", "")
     stage_name = get_stage_name(stage_id)
+    
+    # Get upcoming interview
+    upcoming_interview = get_upcoming_interview(opp_id)
     
     # Get role and location from posting
     role = "Unknown Role"
@@ -154,6 +192,7 @@ def get_candidate_details(opportunity, postings_map):
         "location": location,
         "stage": stage_name,
         "stage_id": stage_id,
+        "interview": upcoming_interview,
     }
 
 
@@ -195,7 +234,19 @@ def format_slack_message(data):
                 stage_text = f"*{stage_name}*\n"
                 for c in by_stage[stage_name]:
                     location = f" ({c['location']})" if c.get("location") else ""
-                    stage_text += f"• {c['name']} — {c['role']}{location}\n"
+                    interview = c.get("interview")
+                    
+                    if interview:
+                        # Has upcoming interview scheduled
+                        interview_text = f" — 📅 {interview}"
+                    elif "Schedule" in c.get("stage", ""):
+                        # In a scheduling stage, no interview yet
+                        interview_text = " — ⏳ _Pending Schedule_"
+                    else:
+                        # Completed interview, awaiting review
+                        interview_text = " — 🔍 _Awaiting Review_"
+                    
+                    stage_text += f"• {c['name']} — {c['role']}{location}{interview_text}\n"
                 
                 blocks.append({
                     "type": "section",
@@ -211,7 +262,16 @@ def format_slack_message(data):
                 stage_text = f"*{stage_name}*\n"
                 for c in candidates:
                     location = f" ({c['location']})" if c.get("location") else ""
-                    stage_text += f"• {c['name']} — {c['role']}{location}\n"
+                    interview = c.get("interview")
+                    
+                    if interview:
+                        interview_text = f" — 📅 {interview}"
+                    elif "Schedule" in c.get("stage", ""):
+                        interview_text = " — ⏳ _Pending Schedule_"
+                    else:
+                        interview_text = " — 🔍 _Awaiting Review_"
+                    
+                    stage_text += f"• {c['name']} — {c['role']}{location}{interview_text}\n"
                 
                 blocks.append({
                     "type": "section",
