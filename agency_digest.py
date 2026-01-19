@@ -6,8 +6,11 @@ Shows pipeline for candidates sourced from a specific agency (Perfectly).
 
 import os
 import requests
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from collections import defaultdict
+
+# Pacific timezone (PST = UTC-8)
+PST = timezone(timedelta(hours=-8))
 
 # === CONFIG ===
 LEVER_API_KEY = os.environ["LEVER_API_KEY"]
@@ -66,14 +69,15 @@ def get_upcoming_interview(opportunity_id):
         result = lever_request(f"opportunities/{opportunity_id}/interviews")
         interviews = result.get("data", [])
         
-        now = datetime.now()
+        now = datetime.now(timezone.utc)
         upcoming = []
         
         for interview in interviews:
             # Get interview date
             date_ms = interview.get("date")
             if date_ms:
-                interview_date = datetime.fromtimestamp(date_ms / 1000)
+                # Lever returns UTC timestamps
+                interview_date = datetime.fromtimestamp(date_ms / 1000, tz=timezone.utc)
                 # Only include future interviews
                 if interview_date > now:
                     upcoming.append({
@@ -85,8 +89,9 @@ def get_upcoming_interview(opportunity_id):
             # Sort by date and return the soonest
             upcoming.sort(key=lambda x: x["date"])
             next_interview = upcoming[0]
-            # Format: "Jan 20, 10:00 AM"
-            return next_interview["date"].strftime("%b %d, %I:%M %p")
+            # Convert to PST and format: "Jan 20, 10:00 AM PST"
+            pst_time = next_interview["date"].astimezone(PST)
+            return pst_time.strftime("%b %d, %I:%M %p PST")
         
         return None
     except Exception as e:
@@ -233,7 +238,6 @@ def format_slack_message(data):
             if stage_name in by_stage:
                 stage_text = f"*{stage_name}*\n"
                 for c in by_stage[stage_name]:
-                    location = f" ({c['location']})" if c.get("location") else ""
                     interview = c.get("interview")
                     
                     if interview:
@@ -246,7 +250,7 @@ def format_slack_message(data):
                         # Completed interview, awaiting review
                         interview_text = " — 🔍 _Awaiting Review_"
                     
-                    stage_text += f"• {c['name']} — {c['role']}{location}{interview_text}\n"
+                    stage_text += f"• {c['name']} — {c['role']}{interview_text}\n"
                 
                 blocks.append({
                     "type": "section",
@@ -261,7 +265,6 @@ def format_slack_message(data):
             if stage_name not in STAGE_ORDER:
                 stage_text = f"*{stage_name}*\n"
                 for c in candidates:
-                    location = f" ({c['location']})" if c.get("location") else ""
                     interview = c.get("interview")
                     
                     if interview:
@@ -271,7 +274,7 @@ def format_slack_message(data):
                     else:
                         interview_text = " — 🔍 _Awaiting Review_"
                     
-                    stage_text += f"• {c['name']} — {c['role']}{location}{interview_text}\n"
+                    stage_text += f"• {c['name']} — {c['role']}{interview_text}\n"
                 
                 blocks.append({
                     "type": "section",
