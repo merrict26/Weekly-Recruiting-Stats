@@ -1,0 +1,276 @@
+#!/usr/bin/env python3
+"""
+Agency Recruiting Digest: Lever → Slack
+Shows pipeline for candidates sourced from a specific agency (Perfectly).
+"""
+
+import os
+import requests
+from datetime import datetime
+from collections import defaultdict
+
+# === CONFIG ===
+LEVER_API_KEY = os.environ["LEVER_API_KEY"]
+SLACK_WEBHOOK_URL = os.environ["SLACK_WEBHOOK_URL_AGENCY"]  # Separate webhook for agency channel
+
+AGENCY_NAME = "Perfectly"  # Filter to this agency
+
+# Lever pipeline stages by ID
+STAGE_NAMES = {
+    "3b5d887e-0629-4ceb-973a-663952c97b21": "Hiring Manager Review",
+    "94d7f5df-ec0f-4061-b54d-bea369ace17b": "Schedule Intro Call",
+    "fb6d2f07-aeab-4f1c-bf35-72f0cffa37f2": "Introductory Call",
+    "160000bb-2cba-40df-b9f0-f69c77cd6175": "Schedule Technical Interview",
+    "fae3d918-0118-4f17-b206-f7f29dca3bec": "Technical Interview",
+    "7ce6a4ba-c34e-4582-be77-dac4b1cf2fe3": "Schedule Technical Interview #2",
+    "a57980a4-4fc4-4252-a0f2-e765e96cfee5": "Technical Interview (#2)",
+    "af0f3cb5-4bec-4fbe-8360-f30e9d0c7272": "Schedule Onsite",
+    "cb7dd941-ed9f-4803-9ed5-158681732b65": "Onsite Interview",
+    "359f9594-ada0-4ca2-bec2-8b3f7eb2106a": "Debrief",
+    "d03862a2-e446-4ade-bee6-4b200cf9b399": "Reference Check",
+    "offer": "Offer",
+}
+
+# Stage order for sorting
+STAGE_ORDER = [
+    "Hiring Manager Review",
+    "Schedule Intro Call",
+    "Introductory Call",
+    "Schedule Technical Interview",
+    "Technical Interview",
+    "Schedule Technical Interview #2",
+    "Technical Interview (#2)",
+    "Schedule Onsite",
+    "Onsite Interview",
+    "Debrief",
+    "Reference Check",
+    "Offer",
+]
+
+
+def lever_request(endpoint, params=None):
+    """Make authenticated request to Lever API."""
+    url = f"https://api.lever.co/v1/{endpoint}"
+    response = requests.get(
+        url,
+        auth=(LEVER_API_KEY, ""),
+        params=params or {}
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def get_all_opportunities():
+    """Fetch all active (non-archived) opportunities from Lever."""
+    opportunities = []
+    has_next = True
+    offset = None
+    
+    while has_next:
+        params = {
+            "limit": 100,
+            "archived": "false",
+            "expand": "applications",
+        }
+        if offset:
+            params["offset"] = offset
+        
+        result = lever_request("opportunities", params)
+        opportunities.extend(result.get("data", []))
+        
+        has_next = result.get("hasNext", False)
+        offset = result.get("next")
+    
+    return opportunities
+
+
+def get_open_postings():
+    """Fetch all published (open) job postings from Lever."""
+    postings = []
+    has_next = True
+    offset = None
+    
+    while has_next:
+        params = {"state": "published", "limit": 100}
+        if offset:
+            params["offset"] = offset
+        
+        result = lever_request("postings", params)
+        postings.extend(result.get("data", []))
+        
+        has_next = result.get("hasNext", False)
+        offset = result.get("next")
+    
+    return postings
+
+
+def is_from_agency(opportunity, agency_name):
+    """Check if candidate was sourced from the specified agency."""
+    sources = opportunity.get("sources", [])
+    for source in sources:
+        if isinstance(source, str) and agency_name.lower() in source.lower():
+            return True
+    return False
+
+
+def get_stage_name(stage_id):
+    """Convert stage ID to human-readable name."""
+    return STAGE_NAMES.get(stage_id, "Unknown Stage")
+
+
+def get_candidate_details(opportunity, postings_map):
+    """Extract candidate name, role, location, and stage."""
+    name = opportunity.get("name", "Unknown")
+    stage_id = opportunity.get("stage", "")
+    stage_name = get_stage_name(stage_id)
+    
+    # Get role and location from posting
+    role = "Unknown Role"
+    location = ""
+    posting_id = None
+    
+    if opportunity.get("posting"):
+        posting_id = opportunity.get("posting")
+    
+    if not posting_id:
+        applications = opportunity.get("applications", [])
+        if applications:
+            first_app = applications[0]
+            if isinstance(first_app, dict):
+                posting_data = first_app.get("posting")
+                if isinstance(posting_data, dict):
+                    posting_id = posting_data.get("id")
+                elif isinstance(posting_data, str):
+                    posting_id = posting_data
+    
+    if posting_id and posting_id in postings_map:
+        posting_info = postings_map[posting_id]
+        role = posting_info.get("title", "Unknown Role")
+        location = posting_info.get("location", "")
+    
+    return {
+        "name": name,
+        "role": role,
+        "location": location,
+        "stage": stage_name,
+        "stage_id": stage_id,
+    }
+
+
+def format_slack_message(data):
+    """Format the digest as a Slack message with blocks."""
+    today = datetime.now()
+    date_str = today.strftime("%B %d, %Y")
+    
+    blocks = [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": f"Perfectly Pipeline — {date_str}",
+                "emoji": True
+            }
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*Active Candidates: {len(data['candidates'])}*"
+            }
+        },
+        {
+            "type": "divider"
+        },
+    ]
+    
+    if data["candidates"]:
+        # Group candidates by stage
+        by_stage = defaultdict(list)
+        for c in data["candidates"]:
+            by_stage[c["stage"]].append(c)
+        
+        # Sort stages by pipeline order
+        for stage_name in STAGE_ORDER:
+            if stage_name in by_stage:
+                stage_text = f"*{stage_name}*\n"
+                for c in by_stage[stage_name]:
+                    location = f" ({c['location']})" if c.get("location") else ""
+                    stage_text += f"• {c['name']} — {c['role']}{location}\n"
+                
+                blocks.append({
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": stage_text
+                    }
+                })
+        
+        # Handle any stages not in our order list
+        for stage_name, candidates in by_stage.items():
+            if stage_name not in STAGE_ORDER:
+                stage_text = f"*{stage_name}*\n"
+                for c in candidates:
+                    location = f" ({c['location']})" if c.get("location") else ""
+                    stage_text += f"• {c['name']} — {c['role']}{location}\n"
+                
+                blocks.append({
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": stage_text
+                    }
+                })
+    else:
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "_No active candidates from Perfectly at this time._"
+            }
+        })
+    
+    return {"blocks": blocks}
+
+
+def post_to_slack(message):
+    """Post formatted message to Slack webhook."""
+    response = requests.post(SLACK_WEBHOOK_URL, json=message)
+    response.raise_for_status()
+    print("✅ Posted to Slack successfully")
+
+
+def main():
+    print("Fetching data from Lever...")
+    
+    opportunities = get_all_opportunities()
+    print(f"Found {len(opportunities)} total active candidates")
+    
+    postings = get_open_postings()
+    print(f"Found {len(postings)} open positions")
+    
+    # Build postings map
+    postings_map = {}
+    for posting in postings:
+        postings_map[posting.get("id")] = {
+            "title": posting.get("text", "Unknown Role"),
+            "location": posting.get("categories", {}).get("location", ""),
+        }
+    
+    # Filter to agency candidates only
+    agency_candidates = []
+    for opp in opportunities:
+        if is_from_agency(opp, AGENCY_NAME):
+            agency_candidates.append(get_candidate_details(opp, postings_map))
+    
+    print(f"Found {len(agency_candidates)} candidates from {AGENCY_NAME}")
+    
+    data = {
+        "candidates": agency_candidates,
+    }
+    
+    message = format_slack_message(data)
+    post_to_slack(message)
+
+
+if __name__ == "__main__":
+    main()
