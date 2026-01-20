@@ -171,6 +171,18 @@ def get_open_postings():
     return postings
 
 
+def get_archive_reasons():
+    """Fetch archive reasons from Lever and return as a map of ID -> text."""
+    result = lever_request("archive_reasons")
+    reasons = result.get("data", [])
+    
+    reasons_map = {}
+    for reason in reasons:
+        reasons_map[reason.get("id")] = reason.get("text", "Archived")
+    
+    return reasons_map
+
+
 def is_from_agency(opportunity, agency_name):
     """Check if candidate was sourced from the specified agency."""
     sources = opportunity.get("sources", [])
@@ -229,7 +241,7 @@ def get_candidate_details(opportunity, postings_map):
     }
 
 
-def get_archived_candidate_details(opportunity, postings_map):
+def get_archived_candidate_details(opportunity, postings_map, archive_reasons_map):
     """Extract archived candidate name, role, archive reason, and date."""
     name = opportunity.get("name", "Unknown")
     
@@ -257,7 +269,8 @@ def get_archived_candidate_details(opportunity, postings_map):
     
     # Get archive reason and date
     archived_info = opportunity.get("archived", {})
-    reason = archived_info.get("reason", "Archived")
+    reason_id = archived_info.get("reason", "")
+    reason = archive_reasons_map.get(reason_id, "Archived")
     archived_at = archived_info.get("archivedAt")
     
     archived_date = ""
@@ -410,6 +423,9 @@ def main():
     postings = get_open_postings()
     print(f"Found {len(postings)} open positions")
     
+    archive_reasons = get_archive_reasons()
+    print(f"Found {len(archive_reasons)} archive reasons")
+    
     # Build postings map
     postings_map = {}
     for posting in postings:
@@ -430,7 +446,7 @@ def main():
     archived_agency_candidates = []
     for opp in archived_opportunities:
         if is_from_agency(opp, AGENCY_NAME):
-            archived_agency_candidates.append(get_archived_candidate_details(opp, postings_map))
+            archived_agency_candidates.append(get_archived_candidate_details(opp, postings_map, archive_reasons))
     
     print(f"Found {len(archived_agency_candidates)} archived candidates from {AGENCY_NAME}")
     
