@@ -17,6 +17,7 @@ LEVER_API_KEY = os.environ["LEVER_API_KEY"]
 SLACK_WEBHOOK_URL = os.environ["SLACK_WEBHOOK_URL_AGENCY"]  # Separate webhook for agency channel
 
 AGENCY_NAME = "Perfectly"  # Filter to this agency
+ARCHIVED_LOOKBACK_DAYS = 14  # How many days back to show archived candidates
 
 # Lever pipeline stages by ID
 STAGE_NAMES = {
@@ -123,6 +124,33 @@ def get_all_opportunities():
     return opportunities
 
 
+def get_archived_opportunities(since_days):
+    """Fetch recently archived opportunities from Lever."""
+    opportunities = []
+    has_next = True
+    offset = None
+    since_date = datetime.now() - timedelta(days=since_days)
+    since_timestamp = int(since_date.timestamp() * 1000)
+    
+    while has_next:
+        params = {
+            "limit": 100,
+            "archived": "true",
+            "expand": "applications",
+            "archived_at_start": since_timestamp,
+        }
+        if offset:
+            params["offset"] = offset
+        
+        result = lever_request("opportunities", params)
+        opportunities.extend(result.get("data", []))
+        
+        has_next = result.get("hasNext", False)
+        offset = result.get("next")
+    
+    return opportunities
+
+
 def get_open_postings():
     """Fetch all published (open) job postings from Lever."""
     postings = []
@@ -198,6 +226,50 @@ def get_candidate_details(opportunity, postings_map):
         "stage": stage_name,
         "stage_id": stage_id,
         "interview": upcoming_interview,
+    }
+
+
+def get_archived_candidate_details(opportunity, postings_map):
+    """Extract archived candidate name, role, archive reason, and date."""
+    name = opportunity.get("name", "Unknown")
+    
+    # Get role from posting
+    role = "Unknown Role"
+    posting_id = None
+    
+    if opportunity.get("posting"):
+        posting_id = opportunity.get("posting")
+    
+    if not posting_id:
+        applications = opportunity.get("applications", [])
+        if applications:
+            first_app = applications[0]
+            if isinstance(first_app, dict):
+                posting_data = first_app.get("posting")
+                if isinstance(posting_data, dict):
+                    posting_id = posting_data.get("id")
+                elif isinstance(posting_data, str):
+                    posting_id = posting_data
+    
+    if posting_id and posting_id in postings_map:
+        posting_info = postings_map[posting_id]
+        role = posting_info.get("title", "Unknown Role")
+    
+    # Get archive reason and date
+    archived_info = opportunity.get("archived", {})
+    reason = archived_info.get("reason", "Archived")
+    archived_at = archived_info.get("archivedAt")
+    
+    archived_date = ""
+    if archived_at:
+        date = datetime.fromtimestamp(archived_at / 1000)
+        archived_date = date.strftime("%b %d")
+    
+    return {
+        "name": name,
+        "role": role,
+        "reason": reason,
+        "date": archived_date,
     }
 
 
@@ -292,6 +364,30 @@ def format_slack_message(data):
             }
         })
     
+    # Add archived candidates section
+    if data.get("archived_candidates"):
+        blocks.append({"type": "divider"})
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"*📁 Recently Archived (Last {ARCHIVED_LOOKBACK_DAYS} Days)*"
+            }
+        })
+        
+        archived_text = ""
+        for c in data["archived_candidates"]:
+            date_text = f" ({c['date']})" if c.get("date") else ""
+            archived_text += f"• {c['name']} — {c['role']} — _{c['reason']}_{date_text}\n"
+        
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": archived_text
+            }
+        })
+    
     return {"blocks": blocks}
 
 
@@ -308,6 +404,9 @@ def main():
     opportunities = get_all_opportunities()
     print(f"Found {len(opportunities)} total active candidates")
     
+    archived_opportunities = get_archived_opportunities(ARCHIVED_LOOKBACK_DAYS)
+    print(f"Found {len(archived_opportunities)} archived candidates in last {ARCHIVED_LOOKBACK_DAYS} days")
+    
     postings = get_open_postings()
     print(f"Found {len(postings)} open positions")
     
@@ -319,16 +418,25 @@ def main():
             "location": posting.get("categories", {}).get("location", ""),
         }
     
-    # Filter to agency candidates only
+    # Filter to agency candidates only (active)
     agency_candidates = []
     for opp in opportunities:
         if is_from_agency(opp, AGENCY_NAME):
             agency_candidates.append(get_candidate_details(opp, postings_map))
     
-    print(f"Found {len(agency_candidates)} candidates from {AGENCY_NAME}")
+    print(f"Found {len(agency_candidates)} active candidates from {AGENCY_NAME}")
+    
+    # Filter to agency candidates only (archived)
+    archived_agency_candidates = []
+    for opp in archived_opportunities:
+        if is_from_agency(opp, AGENCY_NAME):
+            archived_agency_candidates.append(get_archived_candidate_details(opp, postings_map))
+    
+    print(f"Found {len(archived_agency_candidates)} archived candidates from {AGENCY_NAME}")
     
     data = {
         "candidates": agency_candidates,
+        "archived_candidates": archived_agency_candidates,
     }
     
     message = format_slack_message(data)
