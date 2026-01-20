@@ -3,7 +3,7 @@ name: Agency Recruiting Digest (Expanxion)
 on:
   schedule:
     # Runs every weekday at 10am PT (6pm UTC)
-    - cron: '0 18 * * 1-5'
+    - cron: '0 18 * * 5'
   
   # Allow manual trigger for testing
   workflow_dispatch:
