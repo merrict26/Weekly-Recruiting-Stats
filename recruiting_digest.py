@@ -52,6 +52,23 @@ FINAL_STAGE_IDS = [
     "d03862a2-e446-4ade-bee6-4b200cf9b399",
 ]
 
+# Location abbreviations
+LOCATION_SHORT = {
+    "San Mateo, CA": "SF",
+    "San Francisco, CA": "SF",
+    "New York, NY": "NYC",
+    "Bengaluru": "BLR",
+    "Bangalore": "BLR",
+    "Remote": "Remote",
+}
+
+
+def shorten_location(location):
+    """Convert full location to short abbreviation."""
+    if not location:
+        return ""
+    return LOCATION_SHORT.get(location, location)
+
 
 def lever_request(endpoint, params=None):
     """Make authenticated request to Lever API."""
@@ -412,24 +429,23 @@ def format_slack_message(data):
         }
     })
     
-    # List open roles grouped by department/team
+    # List open roles grouped by department/team - table style
     if data["open_positions_grouped"]:
         for group_name, roles in data["open_positions_grouped"].items():
-            group_text = f"*{group_name}*\n"
+            group_text = f"*{group_name}*\n```\n"
             for role in roles:
-                location = f" ({role['location']})" if role.get("location") else ""
+                short_loc = shorten_location(role.get("location", ""))
+                loc_str = f"({short_loc})" if short_loc else ""
                 candidate_count = data["candidates_per_role"].get(role["id"], 0)
                 
-                # Link title to job posting if URL available
-                if role.get("url"):
-                    title_text = f"<{role['url']}|{role['title']}>"
-                else:
-                    title_text = role['title']
+                # Format: Title (LOC)    count
+                title_with_loc = f"{role['title']} {loc_str}".strip()
+                count_str = str(candidate_count) if candidate_count > 0 else "-"
                 
-                if candidate_count > 0:
-                    group_text += f"    • {title_text}{location} — _{candidate_count} candidates_\n"
-                else:
-                    group_text += f"    • {title_text}{location}\n"
+                # Pad to align counts (adjust 40 if titles are longer)
+                group_text += f"{title_with_loc:<45} {count_str:>3}\n"
+            
+            group_text += "```"
             
             blocks.append({
                 "type": "section",
