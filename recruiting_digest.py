@@ -432,8 +432,11 @@ def format_slack_message(data):
     # List open roles grouped by department/team - table style
     if data["open_positions_grouped"]:
         for group_name, roles in data["open_positions_grouped"].items():
+            # Sort roles by candidate count (most to least)
+            sorted_roles = sorted(roles, key=lambda r: data["candidates_per_role"].get(r["id"], 0), reverse=True)
+            
             group_text = f"*{group_name}*\n```\n"
-            for role in roles:
+            for role in sorted_roles:
                 short_loc = shorten_location(role.get("location", ""))
                 loc_str = f"({short_loc})" if short_loc else ""
                 candidate_count = data["candidates_per_role"].get(role["id"], 0)
