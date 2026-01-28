@@ -2,8 +2,8 @@ name: Weekly Recruiting Digest
 
 on:
   schedule:
-    # Runs every Friday at 4pm PT (midnight UTC on Saturday)
-    - cron: '0 0 * * 6'
+  # Runs every Friday at 3:30 pm PT (11:30 pm UTC)
+  - cron: '30 23 * * 5'
   
   # Allow manual trigger for testing
   workflow_dispatch:
