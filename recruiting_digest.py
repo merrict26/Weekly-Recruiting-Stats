@@ -145,9 +145,19 @@ def count_by_stage_group(stage_counts):
 
 
 def get_candidates_added_since(opportunities, since_date):
-    """Count candidates added since a given date."""
+    """Count candidates added since a given date (only in tracked stages)."""
+    # Get all tracked stage IDs
+    tracked_stage_ids = []
+    for stage_list in STAGE_GROUPS.values():
+        tracked_stage_ids.extend(stage_list)
+    
     count = 0
     for opp in opportunities:
+        # Only count if in a tracked stage
+        stage = get_stage_id(opp)
+        if stage not in tracked_stage_ids:
+            continue
+            
         created_at = opp.get("createdAt")
         if created_at:
             created = datetime.fromtimestamp(created_at / 1000)
