@@ -16,6 +16,9 @@ SLACK_WEBHOOK_URL = os.environ["SLACK_WEBHOOK_URL_METRICS"]
 # How many days to look back for metrics (default: 30 days)
 LOOKBACK_DAYS = 30
 
+# Archive reason ID for "Hired" in Lever
+HIRED_REASON_ID = "7fbd076c-7224-415a-bf96-ebd45b9a70dc"
+
 # Stage groups for conversion tracking
 STAGE_ORDER = [
     "Hiring Manager Review",
@@ -68,7 +71,7 @@ def lever_request(endpoint, params=None):
     return response.json()
 
 
-def get_all_opportunities(archived=False):
+def get_all_opportunities(archived=False, fetch_stage_changes=False):
     """Fetch all opportunities from Lever."""
     opportunities = []
     has_next = True
@@ -77,7 +80,7 @@ def get_all_opportunities(archived=False):
     while has_next:
         params = {
             "limit": 100,
-            "expand": "applications,stage,stageChanges",
+            "expand": "applications",
         }
         if archived:
             params["archived"] = "true"
@@ -93,10 +96,18 @@ def get_all_opportunities(archived=False):
         has_next = result.get("hasNext", False)
         offset = result.get("next")
     
+    # Fetch stage changes for each opportunity if requested
+    if fetch_stage_changes:
+        print(f"Fetching stage changes for {len(opportunities)} opportunities...")
+        for i, opp in enumerate(opportunities):
+            opp["stageChanges"] = get_stage_changes(opp.get("id"))
+            if (i + 1) % 50 == 0:
+                print(f"  Processed {i + 1}/{len(opportunities)}")
+    
     return opportunities
 
 
-def get_archived_opportunities_since(since_date):
+def get_archived_opportunities_since(since_date, fetch_stage_changes=False):
     """Fetch opportunities archived since a given date."""
     opportunities = []
     has_next = True
@@ -107,7 +118,7 @@ def get_archived_opportunities_since(since_date):
         params = {
             "limit": 100,
             "archived": "true",
-            "expand": "applications,stageChanges",
+            "expand": "applications",
             "archived_at_start": since_timestamp,
         }
         if offset:
@@ -118,6 +129,14 @@ def get_archived_opportunities_since(since_date):
         
         has_next = result.get("hasNext", False)
         offset = result.get("next")
+    
+    # Fetch stage changes for each opportunity if requested
+    if fetch_stage_changes:
+        print(f"Fetching stage changes for {len(opportunities)} archived opportunities...")
+        for i, opp in enumerate(opportunities):
+            opp["stageChanges"] = get_stage_changes(opp.get("id"))
+            if (i + 1) % 50 == 0:
+                print(f"  Processed {i + 1}/{len(opportunities)}")
     
     return opportunities
 
@@ -132,6 +151,16 @@ def get_archive_reasons():
         reasons_map[reason.get("id")] = reason.get("text", "Unknown")
     
     return reasons_map
+
+
+def get_stage_changes(opportunity_id):
+    """Fetch stage changes for a specific opportunity."""
+    try:
+        result = lever_request(f"opportunities/{opportunity_id}/stageChanges")
+        return result.get("data", [])
+    except Exception as e:
+        print(f"Error fetching stage changes for {opportunity_id}: {e}")
+        return []
 
 
 def get_open_postings():
@@ -154,17 +183,11 @@ def calculate_time_to_hire(archived_opportunities, archive_reasons):
     for stage_list in STAGE_GROUPS.values():
         tracked_stage_ids.extend(stage_list)
     
-    # Find archive reason IDs that indicate "hired"
-    hired_reason_ids = []
-    for reason_id, reason_text in archive_reasons.items():
-        if "hired" in reason_text.lower():
-            hired_reason_ids.append(reason_id)
-    
     for opp in archived_opportunities:
         archived_info = opp.get("archived", {})
         reason_id = archived_info.get("reason", "")
         
-        if reason_id in hired_reason_ids:
+        if reason_id == HIRED_REASON_ID:
             archived_at = archived_info.get("archivedAt")
             
             # Find when they first entered the interview pipeline
@@ -293,12 +316,6 @@ def calculate_offer_acceptance_rate(archived_opportunities, archive_reasons):
     offers_extended = 0
     offers_accepted = 0
     
-    # Find hired reason IDs
-    hired_reason_ids = []
-    for reason_id, reason_text in archive_reasons.items():
-        if "hired" in reason_text.lower():
-            hired_reason_ids.append(reason_id)
-    
     for opp in archived_opportunities:
         # Check if they reached offer stage
         stage_changes = opp.get("stageChanges", [])
@@ -319,7 +336,7 @@ def calculate_offer_acceptance_rate(archived_opportunities, archive_reasons):
             offers_extended += 1
             
             archived_info = opp.get("archived", {})
-            if archived_info.get("reason") in hired_reason_ids:
+            if archived_info.get("reason") == HIRED_REASON_ID:
                 offers_accepted += 1
     
     # Also count active candidates with offers
@@ -338,12 +355,6 @@ def calculate_source_effectiveness(all_opportunities, archived_opportunities, ar
     """Calculate conversion rates by source."""
     source_stats = defaultdict(lambda: {"total": 0, "hired": 0, "in_process": 0})
     
-    # Find hired reason IDs
-    hired_reason_ids = []
-    for reason_id, reason_text in archive_reasons.items():
-        if "hired" in reason_text.lower():
-            hired_reason_ids.append(reason_id)
-    
     # Count active candidates by source
     for opp in all_opportunities:
         sources = opp.get("sources", [])
@@ -360,7 +371,7 @@ def calculate_source_effectiveness(all_opportunities, archived_opportunities, ar
             source_stats[source]["total"] += 1
             
             archived_info = opp.get("archived", {})
-            if archived_info.get("reason") in hired_reason_ids:
+            if archived_info.get("reason") == HIRED_REASON_ID:
                 source_stats[source]["hired"] += 1
     
     # Calculate conversion rates
@@ -477,11 +488,11 @@ def main():
     
     since_date = datetime.now() - timedelta(days=LOOKBACK_DAYS)
     
-    # Fetch data
-    active_opportunities = get_all_opportunities(archived=False)
+    # Fetch data (with stage changes for metrics calculations)
+    active_opportunities = get_all_opportunities(archived=False, fetch_stage_changes=True)
     print(f"Found {len(active_opportunities)} active candidates")
     
-    archived_opportunities = get_archived_opportunities_since(since_date)
+    archived_opportunities = get_archived_opportunities_since(since_date, fetch_stage_changes=True)
     print(f"Found {len(archived_opportunities)} archived candidates in last {LOOKBACK_DAYS} days")
     
     archive_reasons = get_archive_reasons()
