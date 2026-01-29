@@ -1,0 +1,33 @@
+name: Monthly Recruiting Metrics
+
+on:
+  schedule:
+    # Runs on the 1st of every month at 9am PT (5pm UTC)
+    - cron: '0 17 1 * *'
+  
+  # Allow manual trigger for testing
+  workflow_dispatch:
+
+jobs:
+  post-metrics:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      
+      - name: Install dependencies
+        run: |
+          pip install requests
+      
+      - name: Run recruiting metrics
+        env:
+          LEVER_API_KEY: ${{ secrets.LEVER_API_KEY }}
+          SLACK_WEBHOOK_URL_METRICS: ${{ secrets.SLACK_WEBHOOK_URL_METRICS }}
+        run: |
+          python recruiting_metrics.py
