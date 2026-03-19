@@ -1,13 +1,13 @@
 name: Agency Recruiting Digest (Expanxion)
-
+ 
 on:
-  schedule:
-    # Runs every weekday at 10am PT (6pm UTC)
-    - cron: '0 18 * * 5'
-  
-  # Allow manual trigger for testing
+  # Triggered via slash command
   workflow_dispatch:
-
+    inputs:
+      response_url:
+        description: 'Slack response URL'
+        required: true
+ 
 jobs:
   post-digest:
     runs-on: ubuntu-latest
@@ -29,5 +29,8 @@ jobs:
         env:
           LEVER_API_KEY: ${{ secrets.LEVER_API_KEY }}
           SLACK_WEBHOOK_URL_EXPANXION: ${{ secrets.SLACK_WEBHOOK_URL_EXPANXION }}
+          SLACK_RESPONSE_URL: ${{ github.event.inputs.response_url }}
         run: |
+          python expanxion_digest.py
+ 
           python expanxion_digest.py
