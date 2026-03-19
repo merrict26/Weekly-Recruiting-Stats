@@ -3,21 +3,23 @@
 Agency Recruiting Digest: Lever → Slack
 Shows pipeline for candidates sourced from Expanxion.
 """
- 
+
 import os
 import requests
 from datetime import datetime, timedelta, timezone
 from collections import defaultdict
- 
+
 # Pacific timezone (PST = UTC-8)
 PST = timezone(timedelta(hours=-8))
- 
+
 # === CONFIG ===
 LEVER_API_KEY = os.environ["LEVER_API_KEY"]
-SLACK_RESPONSE_URL = os.environ["SLACK_RESPONSE_URL"]
- 
+SLACK_RESPONSE_URL = os.environ.get("SLACK_RESPONSE_URL", "")
+SLACK_CHANNEL_ID = os.environ.get("SLACK_CHANNEL_ID", "")
+SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "")
+
 AGENCY_NAME = "Expanxion"
- 
+
 # Lever pipeline stages by ID
 STAGE_NAMES = {
     "3b5d887e-0629-4ceb-973a-663952c97b21": "Hiring Manager Review",
@@ -33,7 +35,7 @@ STAGE_NAMES = {
     "d03862a2-e446-4ade-bee6-4b200cf9b399": "Reference Check",
     "offer": "Offer",
 }
- 
+
 # Stage order for sorting
 STAGE_ORDER = [
     "Hiring Manager Review",
@@ -49,8 +51,8 @@ STAGE_ORDER = [
     "Reference Check",
     "Offer",
 ]
- 
- 
+
+
 def lever_request(endpoint, params=None):
     """Make authenticated request to Lever API."""
     url = f"https://api.lever.co/v1/{endpoint}"
@@ -61,8 +63,8 @@ def lever_request(endpoint, params=None):
     )
     response.raise_for_status()
     return response.json()
- 
- 
+
+
 def get_upcoming_interview(opportunity_id):
     """Get the next upcoming interview for a candidate."""
     try:
@@ -97,8 +99,8 @@ def get_upcoming_interview(opportunity_id):
     except Exception as e:
         print(f"Error fetching interviews for {opportunity_id}: {e}")
         return None
- 
- 
+
+
 def get_all_opportunities():
     """Fetch all active (non-archived) opportunities from Lever."""
     opportunities = []
@@ -121,8 +123,8 @@ def get_all_opportunities():
         offset = result.get("next")
     
     return opportunities
- 
- 
+
+
 def get_open_postings():
     """Fetch all published (open) job postings from Lever."""
     postings = []
@@ -141,8 +143,8 @@ def get_open_postings():
         offset = result.get("next")
     
     return postings
- 
- 
+
+
 def is_from_agency(opportunity, agency_name):
     """Check if candidate was sourced from the specified agency."""
     sources = opportunity.get("sources", [])
@@ -150,13 +152,13 @@ def is_from_agency(opportunity, agency_name):
         if isinstance(source, str) and agency_name.lower() in source.lower():
             return True
     return False
- 
- 
+
+
 def get_stage_name(stage_id):
     """Convert stage ID to human-readable name."""
     return STAGE_NAMES.get(stage_id, "Unknown Stage")
- 
- 
+
+
 def get_candidate_details(opportunity, postings_map):
     """Extract candidate name, role, location, stage, and interview info."""
     name = opportunity.get("name", "Unknown")
@@ -199,8 +201,8 @@ def get_candidate_details(opportunity, postings_map):
         "stage_id": stage_id,
         "interview": upcoming_interview,
     }
- 
- 
+
+
 def format_slack_message(data):
     """Format the digest as a Slack message with blocks."""
     today = datetime.now()
@@ -293,18 +295,42 @@ def format_slack_message(data):
         })
     
     return {"blocks": blocks}
- 
- 
+
+
 def post_to_slack(message):
-    """Post formatted message to Slack response URL."""
-    # Set response_type so everyone in channel sees it
-    message["response_type"] = "in_channel"
+    """Post formatted message to Slack via response_url or API."""
     
-    response = requests.post(SLACK_RESPONSE_URL, json=message)
-    response.raise_for_status()
-    print("✅ Posted to Slack successfully")
- 
- 
+    if SLACK_RESPONSE_URL:
+        # Slash command - use response_url
+        message["response_type"] = "in_channel"
+        response = requests.post(SLACK_RESPONSE_URL, json=message)
+        response.raise_for_status()
+        print("✅ Posted to Slack via response_url")
+    
+    elif SLACK_CHANNEL_ID and SLACK_BOT_TOKEN:
+        # @mention - use Slack API
+        payload = {
+            "channel": SLACK_CHANNEL_ID,
+            "blocks": message.get("blocks", []),
+        }
+        response = requests.post(
+            "https://slack.com/api/chat.postMessage",
+            headers={
+                "Authorization": f"Bearer {SLACK_BOT_TOKEN}",
+                "Content-Type": "application/json",
+            },
+            json=payload
+        )
+        result = response.json()
+        if result.get("ok"):
+            print("✅ Posted to Slack via API")
+        else:
+            print(f"❌ Slack API error: {result.get('error')}")
+    
+    else:
+        print("❌ No Slack destination configured")
+
+
 def main():
     print("Fetching data from Lever...")
     
@@ -336,7 +362,7 @@ def main():
     
     message = format_slack_message(data)
     post_to_slack(message)
- 
- 
+
+
 if __name__ == "__main__":
     main()
