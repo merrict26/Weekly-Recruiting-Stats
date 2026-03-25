@@ -1,33 +1,39 @@
-name: Monthly Recruiting Metrics
+name: Recruiting Metrics
 
 on:
-  schedule:
-    # Runs on the 1st of every month at 9am PT (5pm UTC)
-    - cron: '0 17 1 * *'
-  
-  # Allow manual trigger for testing
   workflow_dispatch:
+    inputs:
+      response_url:
+        description: 'Slack response URL (from slash command)'
+        required: false
+        default: ''
+      channel_id:
+        description: 'Slack channel ID (from @mention)'
+        required: false
+        default: ''
 
 jobs:
   post-metrics:
     runs-on: ubuntu-latest
-    
+
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
-      
+
       - name: Set up Python
         uses: actions/setup-python@v5
         with:
           python-version: '3.11'
-      
+
       - name: Install dependencies
         run: |
           pip install requests
-      
-      - name: Run recruiting metrics
+
+      - name: Run metrics report
         env:
           LEVER_API_KEY: ${{ secrets.LEVER_API_KEY }}
-          SLACK_WEBHOOK_URL_METRICS: ${{ secrets.SLACK_WEBHOOK_URL_METRICS }}
+          SLACK_RESPONSE_URL: ${{ github.event.inputs.response_url }}
+          SLACK_CHANNEL_ID: ${{ github.event.inputs.channel_id }}
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
         run: |
           python recruiting_metrics.py
