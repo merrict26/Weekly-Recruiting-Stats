@@ -2,6 +2,9 @@
 """
 Monthly Recruiting Metrics: Lever → Slack
 Tracks key recruiting metrics and posts a monthly report to Slack.
+
+Note: This version does not use stageChanges API (not available in permissions).
+Conversion rates are calculated from archived candidate dropoff data.
 """
 
 import os
@@ -11,19 +14,28 @@ from collections import defaultdict
 
 # === CONFIG ===
 LEVER_API_KEY = os.environ["LEVER_API_KEY"]
-SLACK_WEBHOOK_URL = os.environ["SLACK_WEBHOOK_URL_METRICS"]
+SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL_METRICS", "")
+SLACK_RESPONSE_URL = os.environ.get("SLACK_RESPONSE_URL", "")
+SLACK_CHANNEL_ID = os.environ.get("SLACK_CHANNEL_ID", "")
+SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "")
 
-# How many days to look back for metrics (default: 30 days)
+# How many days to look back for metrics
 LOOKBACK_DAYS = 30
+LOOKBACK_DAYS_LONG = 90
 
 # Archive reason ID for "Hired" in Lever
 HIRED_REASON_ID = "7fbd076c-7224-415a-bf96-ebd45b9a70dc"
+
+# Source renaming
+SOURCE_RENAME = {
+    "Added manually": "Sourced by zaimler",
+}
 
 # Stage groups for conversion tracking
 STAGE_ORDER = [
     "Hiring Manager Review",
     "Intro",
-    "Technical", 
+    "Technical",
     "Onsite",
     "Final Stages",
     "Offer",
@@ -58,6 +70,11 @@ for group, ids in STAGE_GROUPS.items():
     for stage_id in ids:
         STAGE_ID_TO_GROUP[stage_id] = group
 
+# All tracked stage IDs
+ALL_TRACKED_STAGE_IDS = set()
+for ids in STAGE_GROUPS.values():
+    ALL_TRACKED_STAGE_IDS.update(ids)
+
 
 def lever_request(endpoint, params=None):
     """Make authenticated request to Lever API."""
@@ -71,12 +88,12 @@ def lever_request(endpoint, params=None):
     return response.json()
 
 
-def get_all_opportunities(archived=False, fetch_stage_changes=False):
+def get_all_opportunities(archived=False):
     """Fetch all opportunities from Lever."""
     opportunities = []
     has_next = True
     offset = None
-    
+
     while has_next:
         params = {
             "limit": 100,
@@ -86,34 +103,26 @@ def get_all_opportunities(archived=False, fetch_stage_changes=False):
             params["archived"] = "true"
         else:
             params["archived"] = "false"
-            
+
         if offset:
             params["offset"] = offset
-        
+
         result = lever_request("opportunities", params)
         opportunities.extend(result.get("data", []))
-        
+
         has_next = result.get("hasNext", False)
         offset = result.get("next")
-    
-    # Fetch stage changes for each opportunity if requested
-    if fetch_stage_changes:
-        print(f"Fetching stage changes for {len(opportunities)} opportunities...")
-        for i, opp in enumerate(opportunities):
-            opp["stageChanges"] = get_stage_changes(opp.get("id"))
-            if (i + 1) % 50 == 0:
-                print(f"  Processed {i + 1}/{len(opportunities)}")
-    
+
     return opportunities
 
 
-def get_archived_opportunities_since(since_date, fetch_stage_changes=False):
+def get_archived_opportunities_since(since_date):
     """Fetch opportunities archived since a given date."""
     opportunities = []
     has_next = True
     offset = None
     since_timestamp = int(since_date.timestamp() * 1000)
-    
+
     while has_next:
         params = {
             "limit": 100,
@@ -123,21 +132,13 @@ def get_archived_opportunities_since(since_date, fetch_stage_changes=False):
         }
         if offset:
             params["offset"] = offset
-        
+
         result = lever_request("opportunities", params)
         opportunities.extend(result.get("data", []))
-        
+
         has_next = result.get("hasNext", False)
         offset = result.get("next")
-    
-    # Fetch stage changes for each opportunity if requested
-    if fetch_stage_changes:
-        print(f"Fetching stage changes for {len(opportunities)} archived opportunities...")
-        for i, opp in enumerate(opportunities):
-            opp["stageChanges"] = get_stage_changes(opp.get("id"))
-            if (i + 1) % 50 == 0:
-                print(f"  Processed {i + 1}/{len(opportunities)}")
-    
+
     return opportunities
 
 
@@ -145,22 +146,12 @@ def get_archive_reasons():
     """Fetch archive reasons from Lever."""
     result = lever_request("archive_reasons")
     reasons = result.get("data", [])
-    
+
     reasons_map = {}
     for reason in reasons:
         reasons_map[reason.get("id")] = reason.get("text", "Unknown")
-    
+
     return reasons_map
-
-
-def get_stage_changes(opportunity_id):
-    """Fetch stage changes for a specific opportunity."""
-    try:
-        result = lever_request(f"opportunities/{opportunity_id}/stageChanges")
-        return result.get("data", [])
-    except Exception as e:
-        print(f"Error fetching stage changes for {opportunity_id}: {e}")
-        return []
 
 
 def get_open_postings():
@@ -169,233 +160,249 @@ def get_open_postings():
     return result.get("data", [])
 
 
-def calculate_time_to_hire(archived_opportunities, archive_reasons):
+def get_stage_group(stage_id):
+    """Get the stage group for a stage ID."""
+    if stage_id == "offer":
+        return "Offer"
+    return STAGE_ID_TO_GROUP.get(stage_id)
+
+
+def calculate_time_to_hire(archived_opportunities):
     """
     Calculate average time to hire for candidates who were hired.
-    Time is measured from when they first entered the interview pipeline
-    (Hiring Manager Review stage) to when they were marked as hired.
+    Uses createdAt → archivedAt since stageChanges isn't available.
+    Note: This will be inflated compared to true pipeline entry time.
     """
     hired_times = []
-    hired_by_dept = defaultdict(list)
-    
-    # Get all tracked stage IDs (the interview pipeline)
-    tracked_stage_ids = []
-    for stage_list in STAGE_GROUPS.values():
-        tracked_stage_ids.extend(stage_list)
-    
+
     for opp in archived_opportunities:
         archived_info = opp.get("archived", {})
         reason_id = archived_info.get("reason", "")
-        
+
         if reason_id == HIRED_REASON_ID:
+            created_at = opp.get("createdAt")
             archived_at = archived_info.get("archivedAt")
-            
-            # Find when they first entered the interview pipeline
-            # Look for the earliest stage change into a tracked stage
-            stage_changes = opp.get("stageChanges", [])
-            pipeline_entry_time = None
-            
-            for change in stage_changes:
-                to_stage = change.get("toStageId")
-                updated_at = change.get("updatedAt")
-                
-                if to_stage in tracked_stage_ids and updated_at:
-                    if pipeline_entry_time is None or updated_at < pipeline_entry_time:
-                        pipeline_entry_time = updated_at
-            
-            if pipeline_entry_time and archived_at:
-                days = (archived_at - pipeline_entry_time) / (1000 * 60 * 60 * 24)
+
+            if created_at and archived_at:
+                days = (archived_at - created_at) / (1000 * 60 * 60 * 24)
                 hired_times.append(days)
-                
-                # Get department from application
-                dept = "Unknown"
-                apps = opp.get("applications", [])
-                if apps:
-                    posting = apps[0].get("posting", {})
-                    if isinstance(posting, dict):
-                        dept = posting.get("categories", {}).get("department", "Unknown")
-                
-                hired_by_dept[dept].append(days)
-    
+
     avg_overall = sum(hired_times) / len(hired_times) if hired_times else 0
-    
-    avg_by_dept = {}
-    for dept, times in hired_by_dept.items():
-        avg_by_dept[dept] = sum(times) / len(times) if times else 0
-    
+
     return {
         "overall": round(avg_overall, 1),
-        "by_department": {k: round(v, 1) for k, v in avg_by_dept.items()},
         "total_hires": len(hired_times),
     }
 
 
-def calculate_stage_conversion_rates(all_opportunities):
-    """Calculate conversion rates between stages."""
-    # Count candidates who reached each stage group
-    reached_stage = defaultdict(int)
-    
-    for opp in all_opportunities:
-        stage_changes = opp.get("stageChanges", [])
-        stages_visited = set()
-        
-        for change in stage_changes:
-            stage_id = change.get("toStageId")
-            if stage_id and stage_id in STAGE_ID_TO_GROUP:
-                stages_visited.add(STAGE_ID_TO_GROUP[stage_id])
-        
-        # Also count current stage
-        current_stage = opp.get("stage")
-        if current_stage and current_stage in STAGE_ID_TO_GROUP:
-            stages_visited.add(STAGE_ID_TO_GROUP[current_stage])
-        
-        for stage in stages_visited:
-            reached_stage[stage] += 1
-    
+def calculate_stage_conversions(archived_opportunities, lookback_days):
+    """
+    Calculate conversion rates between stages using archived candidates.
+    Works backwards from dropoff data to estimate conversion rates.
+    """
+    cutoff = datetime.now() - timedelta(days=lookback_days)
+    cutoff_ms = cutoff.timestamp() * 1000
+
+    # Filter to lookback period
+    recent_archived = [
+        opp for opp in archived_opportunities
+        if opp.get("archived", {}).get("archivedAt", 0) >= cutoff_ms
+    ]
+
+    # Count dropoffs at each stage and hires
+    dropped_at = defaultdict(int)
+    hired_count = 0
+
+    for opp in recent_archived:
+        archived_info = opp.get("archived", {})
+        reason_id = archived_info.get("reason", "")
+
+        if reason_id == HIRED_REASON_ID:
+            hired_count += 1
+        else:
+            # Dropped - count at their stage
+            stage_id = opp.get("stage")
+            stage_group = get_stage_group(stage_id)
+            if stage_group:
+                dropped_at[stage_group] += 1
+
+    # Work backwards to calculate who entered each stage
+    # entered[stage] = dropped_at[stage] + entered[next_stage]
+    stage_transitions = [
+        ("Intro", "Technical"),
+        ("Technical", "Onsite"),
+        ("Onsite", "Offer"),  # Combines Final Stages
+        ("Offer", "Hired"),
+    ]
+
+    # Start from the end
+    entered = {}
+    entered["Hired"] = hired_count
+    entered["Offer"] = dropped_at.get("Offer", 0) + dropped_at.get("Final Stages", 0) + hired_count
+    entered["Onsite"] = dropped_at.get("Onsite", 0) + entered["Offer"]
+    entered["Technical"] = dropped_at.get("Technical", 0) + entered["Onsite"]
+    entered["Intro"] = dropped_at.get("Intro", 0) + entered["Technical"]
+
     # Calculate conversion rates
     conversions = {}
-    for i in range(len(STAGE_ORDER) - 1):
-        from_stage = STAGE_ORDER[i]
-        to_stage = STAGE_ORDER[i + 1]
-        
-        from_count = reached_stage.get(from_stage, 0)
-        to_count = reached_stage.get(to_stage, 0)
-        
+    for from_stage, to_stage in stage_transitions:
+        from_count = entered.get(from_stage, 0)
+        to_count = entered.get(to_stage, 0)
+
         if from_count > 0:
             rate = (to_count / from_count) * 100
-        else:
-            rate = 0
-        
-        conversions[f"{from_stage} → {to_stage}"] = {
-            "from": from_count,
-            "to": to_count,
-            "rate": round(rate, 1),
-        }
-    
+            conversions[f"{from_stage} → {to_stage}"] = {
+                "rate": round(rate, 0),
+                "from": from_count,
+                "to": to_count,
+            }
+
     return conversions
 
 
-def calculate_time_in_stage(all_opportunities):
-    """Calculate average time spent in each stage."""
-    stage_times = defaultdict(list)
-    
-    for opp in all_opportunities:
-        stage_changes = opp.get("stageChanges", [])
-        
-        # Sort by timestamp
-        sorted_changes = sorted(stage_changes, key=lambda x: x.get("updatedAt", 0))
-        
-        for i, change in enumerate(sorted_changes):
-            stage_id = change.get("toStageId")
-            entered_at = change.get("updatedAt")
-            
-            if not stage_id or stage_id not in STAGE_ID_TO_GROUP:
-                continue
-            
-            stage_group = STAGE_ID_TO_GROUP[stage_id]
-            
-            # Find when they left this stage
-            left_at = None
-            if i + 1 < len(sorted_changes):
-                left_at = sorted_changes[i + 1].get("updatedAt")
-            
-            if entered_at and left_at:
-                days = (left_at - entered_at) / (1000 * 60 * 60 * 24)
-                stage_times[stage_group].append(days)
-    
-    avg_times = {}
-    for stage, times in stage_times.items():
-        if times:
-            avg_times[stage] = round(sum(times) / len(times), 1)
-    
-    return avg_times
+def calculate_current_pipeline(active_opportunities):
+    """Count active candidates in each tracked stage."""
+    pipeline = defaultdict(int)
+
+    for opp in active_opportunities:
+        stage_id = opp.get("stage")
+        stage_group = get_stage_group(stage_id)
+        if stage_group:
+            pipeline[stage_group] += 1
+
+    return dict(pipeline)
 
 
-def calculate_offer_acceptance_rate(archived_opportunities, archive_reasons):
-    """Calculate offer acceptance rate."""
-    offers_extended = 0
-    offers_accepted = 0
-    
+def calculate_source_effectiveness(active_opportunities, archived_opportunities):
+    """
+    Calculate conversion rates by source.
+    Only counts candidates who made it past HM Review.
+    """
+    source_stats = defaultdict(lambda: {"total": 0, "hired": 0, "onsite": 0})
+
+    # Stages at Onsite or beyond
+    onsite_and_beyond = {"Onsite", "Final Stages", "Offer"}
+
+    # Process active candidates (past HM Review = in tracked pipeline)
+    for opp in active_opportunities:
+        stage_id = opp.get("stage")
+        stage_group = get_stage_group(stage_id)
+
+        # Only count if past HM Review
+        if stage_group and stage_group != "Hiring Manager Review":
+            sources = opp.get("sources", [])
+            source = sources[0] if sources else "Unknown"
+            if isinstance(source, str):
+                source = SOURCE_RENAME.get(source, source)
+                source_stats[source]["total"] += 1
+
+                if stage_group in onsite_and_beyond:
+                    source_stats[source]["onsite"] += 1
+
+    # Process archived candidates
     for opp in archived_opportunities:
-        # Check if they reached offer stage
-        stage_changes = opp.get("stageChanges", [])
-        reached_offer = False
-        
-        for change in stage_changes:
-            stage_id = change.get("toStageId")
-            if stage_id and STAGE_ID_TO_GROUP.get(stage_id) == "Offer":
-                reached_offer = True
-                break
-        
-        # Also check current stage
-        current_stage = opp.get("stage")
-        if current_stage and STAGE_ID_TO_GROUP.get(current_stage) == "Offer":
-            reached_offer = True
-        
-        if reached_offer:
-            offers_extended += 1
-            
-            archived_info = opp.get("archived", {})
-            if archived_info.get("reason") == HIRED_REASON_ID:
-                offers_accepted += 1
-    
-    # Also count active candidates with offers
-    # (they haven't accepted/declined yet, so don't count in rate)
-    
-    rate = (offers_accepted / offers_extended * 100) if offers_extended > 0 else 0
-    
-    return {
-        "extended": offers_extended,
-        "accepted": offers_accepted,
-        "rate": round(rate, 1),
-    }
+        stage_id = opp.get("stage")
+        stage_group = get_stage_group(stage_id)
 
+        # Only count if past HM Review
+        if stage_group and stage_group != "Hiring Manager Review":
+            sources = opp.get("sources", [])
+            source = sources[0] if sources else "Unknown"
+            if isinstance(source, str):
+                source = SOURCE_RENAME.get(source, source)
+                source_stats[source]["total"] += 1
 
-def calculate_source_effectiveness(all_opportunities, archived_opportunities, archive_reasons):
-    """Calculate conversion rates by source."""
-    source_stats = defaultdict(lambda: {"total": 0, "hired": 0, "in_process": 0})
-    
-    # Count active candidates by source
-    for opp in all_opportunities:
-        sources = opp.get("sources", [])
-        source = sources[0] if sources else "Unknown"
-        if isinstance(source, str):
-            source_stats[source]["total"] += 1
-            source_stats[source]["in_process"] += 1
-    
-    # Count archived candidates by source
-    for opp in archived_opportunities:
-        sources = opp.get("sources", [])
-        source = sources[0] if sources else "Unknown"
-        if isinstance(source, str):
-            source_stats[source]["total"] += 1
-            
-            archived_info = opp.get("archived", {})
-            if archived_info.get("reason") == HIRED_REASON_ID:
-                source_stats[source]["hired"] += 1
-    
-    # Calculate conversion rates
-    results = {}
+                archived_info = opp.get("archived", {})
+                if archived_info.get("reason") == HIRED_REASON_ID:
+                    source_stats[source]["hired"] += 1
+
+                if stage_group in onsite_and_beyond:
+                    source_stats[source]["onsite"] += 1
+
+    # Calculate conversion rates and sort
+    results = []
     for source, stats in source_stats.items():
         if stats["total"] > 0:
-            results[source] = {
+            results.append({
+                "source": source,
                 "total": stats["total"],
                 "hired": stats["hired"],
-                "in_process": stats["in_process"],
-                "conversion": round((stats["hired"] / stats["total"]) * 100, 1) if stats["total"] > 0 else 0,
-            }
+                "onsite": stats["onsite"],
+                "conversion": round((stats["hired"] / stats["total"]) * 100, 1),
+            })
+
+    # Sort by conversion rate (descending)
+    results.sort(key=lambda x: x["conversion"], reverse=True)
+
+    return results
+
+
+def calculate_offer_acceptance_by_role(archived_opportunities):
+    """
+    Calculate offer acceptance/rejection by position.
+    Tracks candidates who reached Offer stage or Final Stages.
+    """
+    # Stages that indicate an offer was extended
+    offer_stages = {"Offer", "Final Stages"}
     
-    # Sort by total candidates
-    sorted_results = dict(sorted(results.items(), key=lambda x: x[1]["total"], reverse=True))
+    role_stats = defaultdict(lambda: {"extended": 0, "accepted": 0, "rejected": 0, "candidates": []})
     
-    return sorted_results
+    for opp in archived_opportunities:
+        stage_id = opp.get("stage")
+        stage_group = get_stage_group(stage_id)
+        
+        # Only count candidates who reached offer/final stages
+        if stage_group not in offer_stages:
+            continue
+        
+        # Get role from posting
+        role = "Unknown Role"
+        apps = opp.get("applications", [])
+        if apps:
+            posting = apps[0].get("posting", {})
+            if isinstance(posting, dict):
+                role = posting.get("text", "Unknown Role")
+            elif isinstance(posting, str):
+                role = posting
+        
+        candidate_name = opp.get("name", "Unknown")
+        archived_info = opp.get("archived", {})
+        reason_id = archived_info.get("reason", "")
+        
+        role_stats[role]["extended"] += 1
+        
+        if reason_id == HIRED_REASON_ID:
+            role_stats[role]["accepted"] += 1
+            role_stats[role]["candidates"].append({"name": candidate_name, "status": "✅"})
+        else:
+            role_stats[role]["rejected"] += 1
+            role_stats[role]["candidates"].append({"name": candidate_name, "status": "❌"})
+    
+    # Calculate acceptance rates and format
+    results = []
+    for role, stats in role_stats.items():
+        if stats["extended"] > 0:
+            rate = (stats["accepted"] / stats["extended"]) * 100
+            results.append({
+                "role": role,
+                "extended": stats["extended"],
+                "accepted": stats["accepted"],
+                "rejected": stats["rejected"],
+                "rate": round(rate, 0),
+                "candidates": stats["candidates"],
+            })
+    
+    # Sort by number of offers extended (descending)
+    results.sort(key=lambda x: x["extended"], reverse=True)
+    
+    return results
 
 
 def format_slack_message(metrics):
     """Format metrics as a Slack message."""
     today = datetime.now()
     month_name = today.strftime("%B %Y")
-    
+
     blocks = [
         {
             "type": "header",
@@ -416,114 +423,189 @@ def format_slack_message(metrics):
         },
         {"type": "divider"},
     ]
-    
+
     # 1. Time to Hire
     tth = metrics["time_to_hire"]
     tth_text = f"*⏱️ Time to Hire*\n"
-    tth_text += f"Overall average: *{tth['overall']} days*\n"
-    if tth["by_department"]:
-        tth_text += "\nBy department:\n```\n"
-        for dept, days in sorted(tth["by_department"].items()):
-            tth_text += f"{dept:<25} {days:>5} days\n"
-        tth_text += "```"
-    
+    tth_text += f"Average: *{tth['overall']} days* (from application to offer accepted)\n"
+    tth_text += f"_Based on {tth['total_hires']} hires_"
+
     blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": tth_text}})
     blocks.append({"type": "divider"})
-    
-    # 2. Stage Conversion Rates
-    conv = metrics["stage_conversions"]
+
+    # 2. Current Pipeline
+    pipeline = metrics["pipeline"]
+    if pipeline:
+        pipe_text = f"*📋 Current Pipeline*\n```\n"
+        total = 0
+        for stage in STAGE_ORDER:
+            count = pipeline.get(stage, 0)
+            total += count
+            pipe_text += f"{stage:<25} {count:>4}\n"
+        pipe_text += f"{'─' * 30}\n"
+        pipe_text += f"{'Total':<25} {total:>4}\n"
+        pipe_text += "```"
+
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": pipe_text}})
+        blocks.append({"type": "divider"})
+
+    # 3. Stage Conversion Rates (30d vs 90d)
+    conv_30 = metrics["stage_conversions_30d"]
+    conv_90 = metrics["stage_conversions_90d"]
+
     conv_text = f"*🔄 Stage Conversion Rates*\n```\n"
-    for stage_pair, data in conv.items():
-        conv_text += f"{stage_pair:<35} {data['rate']:>5}%  ({data['to']}/{data['from']})\n"
+    conv_text += f"{'Stage':<22} {'30d':>10} {'90d':>12}\n"
+    conv_text += "─" * 46 + "\n"
+
+    for stage_pair in conv_30.keys():
+        data_30 = conv_30.get(stage_pair, {})
+        data_90 = conv_90.get(stage_pair, {})
+
+        rate_30 = f"{int(data_30.get('rate', 0))}%"
+        detail_30 = f"({data_30.get('to', 0)}/{data_30.get('from', 0)})"
+
+        rate_90 = f"{int(data_90.get('rate', 0))}%"
+        detail_90 = f"({data_90.get('to', 0)}/{data_90.get('from', 0)})"
+
+        conv_text += f"{stage_pair:<22} {rate_30:>4} {detail_30:<6} {rate_90:>4} {detail_90:<6}\n"
+
     conv_text += "```"
-    
+
     blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": conv_text}})
     blocks.append({"type": "divider"})
-    
-    # 3. Time in Stage
-    tis = metrics["time_in_stage"]
-    if tis:
-        tis_text = f"*⏳ Average Time in Stage*\n```\n"
-        for stage in STAGE_ORDER:
-            if stage in tis:
-                tis_text += f"{stage:<25} {tis[stage]:>5} days\n"
-        tis_text += "```"
-        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": tis_text}})
+
+    # 4. Offer Acceptance by Role
+    offers = metrics.get("offer_acceptance_by_role", [])
+    if offers:
+        offer_text = f"*🎯 Offer Acceptance by Role* _(90 days)_\n```\n"
+        offer_text += f"{'Role':<30} {'Rate':>6} {'✅':>3} {'❌':>3}\n"
+        offer_text += "─" * 45 + "\n"
+        
+        for o in offers:
+            role_name = o["role"][:29] if len(o["role"]) > 29 else o["role"]
+            rate = f"{int(o['rate'])}%"
+            offer_text += f"{role_name:<30} {rate:>5} {o['accepted']:>3} {o['rejected']:>3}\n"
+        
+        # Overall totals
+        total_extended = sum(o["extended"] for o in offers)
+        total_accepted = sum(o["accepted"] for o in offers)
+        total_rejected = sum(o["rejected"] for o in offers)
+        overall_rate = (total_accepted / total_extended * 100) if total_extended > 0 else 0
+        
+        offer_text += "─" * 45 + "\n"
+        offer_text += f"{'Overall':<30} {int(overall_rate):>4}% {total_accepted:>3} {total_rejected:>3}\n"
+        offer_text += "```"
+        
+        blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": offer_text}})
         blocks.append({"type": "divider"})
-    
-    # 4. Offer Acceptance Rate
-    oar = metrics["offer_acceptance"]
-    oar_text = f"*🎯 Offer Acceptance Rate*\n"
-    oar_text += f"Rate: *{oar['rate']}%* ({oar['accepted']}/{oar['extended']} offers accepted)"
-    
-    blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": oar_text}})
-    blocks.append({"type": "divider"})
-    
-    # 5. Source Effectiveness (top 10)
+
+    # 5. Source Effectiveness (top sources with hires or high volume)
     sources = metrics["source_effectiveness"]
-    source_text = f"*📍 Source Effectiveness (Top 10)*\n```\n"
-    source_text += f"{'Source':<25} {'Total':>6} {'Hired':>6} {'Conv%':>6}\n"
-    source_text += "-" * 45 + "\n"
-    
-    for source, data in list(sources.items())[:10]:
-        # Truncate long source names
-        source_name = source[:24] if len(source) > 24 else source
-        source_text += f"{source_name:<25} {data['total']:>6} {data['hired']:>6} {data['conversion']:>5}%\n"
+    source_text = f"*📍 Source Effectiveness* _(past HM Review)_\n```\n"
+    source_text += f"{'Source':<25} {'Conv':>5} {'Hire':>5} {'Ons':>4} {'Tot':>4}\n"
+    source_text += "─" * 45 + "\n"
+
+    # Show top 8 sources
+    shown = 0
+    for s in sources:
+        if shown >= 8:
+            break
+        source_name = s["source"][:24] if len(s["source"]) > 24 else s["source"]
+        source_text += f"{source_name:<25} {s['conversion']:>4}% {s['hired']:>5} {s['onsite']:>4} {s['total']:>4}\n"
+        shown += 1
+
     source_text += "```"
-    
+
     blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": source_text}})
-    
+
     return {"blocks": blocks}
 
 
 def post_to_slack(message):
-    """Post formatted message to Slack webhook."""
-    response = requests.post(SLACK_WEBHOOK_URL, json=message)
-    response.raise_for_status()
-    print("✅ Posted to Slack successfully")
+    """Post formatted message to Slack."""
+
+    if SLACK_RESPONSE_URL:
+        # Slash command - use response_url
+        message["response_type"] = "in_channel"
+        response = requests.post(SLACK_RESPONSE_URL, json=message)
+        response.raise_for_status()
+        print("✅ Posted to Slack via response_url")
+
+    elif SLACK_CHANNEL_ID and SLACK_BOT_TOKEN:
+        # @mention - use Slack API
+        payload = {
+            "channel": SLACK_CHANNEL_ID,
+            "blocks": message.get("blocks", []),
+        }
+        response = requests.post(
+            "https://slack.com/api/chat.postMessage",
+            headers={
+                "Authorization": f"Bearer {SLACK_BOT_TOKEN}",
+                "Content-Type": "application/json",
+            },
+            json=payload
+        )
+        result = response.json()
+        if result.get("ok"):
+            print("✅ Posted to Slack via API")
+        else:
+            print(f"❌ Slack API error: {result.get('error')}")
+
+    elif SLACK_WEBHOOK_URL:
+        # Webhook
+        response = requests.post(SLACK_WEBHOOK_URL, json=message)
+        response.raise_for_status()
+        print("✅ Posted to Slack via webhook")
+
+    else:
+        print("❌ No Slack destination configured")
 
 
 def main():
     print("Fetching data from Lever...")
-    
-    since_date = datetime.now() - timedelta(days=LOOKBACK_DAYS)
-    
-    # Fetch data (with stage changes for metrics calculations)
-    active_opportunities = get_all_opportunities(archived=False, fetch_stage_changes=True)
+
+    since_date_30 = datetime.now() - timedelta(days=LOOKBACK_DAYS)
+    since_date_90 = datetime.now() - timedelta(days=LOOKBACK_DAYS_LONG)
+
+    # Fetch active opportunities
+    active_opportunities = get_all_opportunities(archived=False)
     print(f"Found {len(active_opportunities)} active candidates")
-    
-    archived_opportunities = get_archived_opportunities_since(since_date, fetch_stage_changes=True)
-    print(f"Found {len(archived_opportunities)} archived candidates in last {LOOKBACK_DAYS} days")
-    
-    archive_reasons = get_archive_reasons()
-    
-    # Combine for some metrics
-    all_opportunities = active_opportunities + archived_opportunities
-    
+
+    # Fetch archived opportunities (90 days for comparison)
+    archived_opportunities = get_archived_opportunities_since(since_date_90)
+    print(f"Found {len(archived_opportunities)} archived candidates in last {LOOKBACK_DAYS_LONG} days")
+
     # Calculate metrics
     print("Calculating metrics...")
-    
-    time_to_hire = calculate_time_to_hire(archived_opportunities, archive_reasons)
+
+    time_to_hire = calculate_time_to_hire(archived_opportunities)
     print(f"Time to hire: {time_to_hire['overall']} days ({time_to_hire['total_hires']} hires)")
-    
-    stage_conversions = calculate_stage_conversion_rates(all_opportunities)
-    
-    time_in_stage = calculate_time_in_stage(all_opportunities)
-    
-    offer_acceptance = calculate_offer_acceptance_rate(archived_opportunities, archive_reasons)
-    print(f"Offer acceptance: {offer_acceptance['rate']}%")
-    
-    source_effectiveness = calculate_source_effectiveness(active_opportunities, archived_opportunities, archive_reasons)
-    
+
+    pipeline = calculate_current_pipeline(active_opportunities)
+
+    stage_conversions_30d = calculate_stage_conversions(archived_opportunities, LOOKBACK_DAYS)
+    stage_conversions_90d = calculate_stage_conversions(archived_opportunities, LOOKBACK_DAYS_LONG)
+
+    # For source effectiveness, use 30d archived
+    archived_30d = [
+        opp for opp in archived_opportunities
+        if opp.get("archived", {}).get("archivedAt", 0) >= since_date_30.timestamp() * 1000
+    ]
+    source_effectiveness = calculate_source_effectiveness(active_opportunities, archived_30d)
+
+    # Offer acceptance by role (90 days)
+    offer_acceptance_by_role = calculate_offer_acceptance_by_role(archived_opportunities)
+
     metrics = {
         "time_to_hire": time_to_hire,
-        "stage_conversions": stage_conversions,
-        "time_in_stage": time_in_stage,
-        "offer_acceptance": offer_acceptance,
+        "pipeline": pipeline,
+        "stage_conversions_30d": stage_conversions_30d,
+        "stage_conversions_90d": stage_conversions_90d,
+        "offer_acceptance_by_role": offer_acceptance_by_role,
         "source_effectiveness": source_effectiveness,
         "total_hires": time_to_hire["total_hires"],
     }
-    
+
     # Format and send
     message = format_slack_message(metrics)
     post_to_slack(message)
