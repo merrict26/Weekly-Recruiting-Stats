@@ -243,16 +243,31 @@ def build_data_summary(active, archived, postings_map):
     days_7_ms = 7 * 24 * 60 * 60 * 1000
     days_90_ms = 90 * 24 * 60 * 60 * 1000
 
-    # Stage IDs for COMPLETED interview stages (moved to this stage = interview done)
-    completed_stage_ids = {
-        "Intro": ["fb6d2f07-aeab-4f1c-bf35-72f0cffa37f2"],  # Introductory Call (completed)
-        "Technical": [
-            "fae3d918-0118-4f17-b206-f7f29dca3bec",  # Technical Interview (completed)
-            "a57980a4-4fc4-4252-a0f2-e765e96cfee5",  # Technical Interview #2 (completed)
-        ],
-        "Onsite": ["cb7dd941-ed9f-4803-9ed5-158681732b65"],  # Onsite interview (completed)
-        "Final Stages": ["359f9594-ada0-4ca2-bec2-8b3f7eb2106a", "d03862a2-e446-4ade-bee6-4b200cf9b399"],
-        "Offer": ["offer"],
+    # To count COMPLETED interviews, we track:
+    # 1. When candidates move to the NEXT stage (they passed)
+    # 2. When candidates are archived FROM a stage (they completed but didn't pass)
+    
+    completed_markers = {
+        # If someone moved TO these stages, it means they COMPLETED the previous stage
+        "160000bb-2cba-40df-b9f0-f69c77cd6175": "Intro",  # Schedule Technical = completed Intro
+        "fae3d918-0118-4f17-b206-f7f29dca3bec": "Intro",  # Technical Interview = completed Intro
+        "7ce6a4ba-c34e-4582-be77-dac4b1cf2fe3": "Technical",  # Schedule Tech #2 = completed Technical #1
+        "a57980a4-4fc4-4252-a0f2-e765e96cfee5": "Technical",  # Technical #2 = completed Technical #1
+        "af0f3cb5-4bec-4fbe-8360-f30e9d0c7272": "Technical",  # Schedule Onsite = completed Technical
+        "cb7dd941-ed9f-4803-9ed5-158681732b65": "Technical",  # Onsite = completed Technical
+        "359f9594-ada0-4ca2-bec2-8b3f7eb2106a": "Onsite",  # Debrief = completed Onsite
+        "d03862a2-e446-4ade-bee6-4b200cf9b399": "Onsite",  # Ref Check = completed Onsite (or Debrief)
+        "offer": "Final Stages",  # Offer = completed Final Stages
+    }
+    
+    # Map stage IDs to interview type (for tracking archived candidates)
+    stage_to_interview_type = {
+        "fb6d2f07-aeab-4f1c-bf35-72f0cffa37f2": "Intro",  # Introductory Call
+        "fae3d918-0118-4f17-b206-f7f29dca3bec": "Technical",  # Technical Interview
+        "a57980a4-4fc4-4252-a0f2-e765e96cfee5": "Technical",  # Technical #2
+        "cb7dd941-ed9f-4803-9ed5-158681732b65": "Onsite",  # Onsite interview
+        "359f9594-ada0-4ca2-bec2-8b3f7eb2106a": "Final Stages",  # Debrief
+        "d03862a2-e446-4ade-bee6-4b200cf9b399": "Final Stages",  # Ref Check
     }
     
     # Stage IDs for SCHEDULED interviews (moved to this stage = interview scheduled)
@@ -265,12 +280,7 @@ def build_data_summary(active, archived, postings_map):
         "Onsite": ["af0f3cb5-4bec-4fbe-8360-f30e9d0c7272"],  # Schedule Onsite
     }
 
-    # Build reverse lookups
-    completed_stage_lookup = {}
-    for stage_name, ids in completed_stage_ids.items():
-        for stage_id in ids:
-            completed_stage_lookup[stage_id] = stage_name
-    
+    # Build reverse lookup for scheduled
     scheduled_stage_lookup = {}
     for stage_name, ids in scheduled_stage_ids.items():
         for stage_id in ids:
@@ -278,9 +288,9 @@ def build_data_summary(active, archived, postings_map):
 
     # Count completed interviews by time period
     interviews_completed = {
-        "last_7_days": {"Intro": 0, "Technical": 0, "Onsite": 0, "Final Stages": 0, "Offer": 0},
-        "last_30_days": {"Intro": 0, "Technical": 0, "Onsite": 0, "Final Stages": 0, "Offer": 0},
-        "last_90_days": {"Intro": 0, "Technical": 0, "Onsite": 0, "Final Stages": 0, "Offer": 0},
+        "last_7_days": {"Intro": 0, "Technical": 0, "Onsite": 0, "Final Stages": 0},
+        "last_30_days": {"Intro": 0, "Technical": 0, "Onsite": 0, "Final Stages": 0},
+        "last_90_days": {"Intro": 0, "Technical": 0, "Onsite": 0, "Final Stages": 0},
     }
     
     # Count scheduled interviews by time period
@@ -292,9 +302,17 @@ def build_data_summary(active, archived, postings_map):
 
     # Recent completed interviews with candidate details
     recent_interviews = []
+    
+    # Recent scheduled interviews with candidate details
+    recent_scheduled = []
+    
+    # Track which candidates we've already counted for each stage (to avoid double counting)
+    counted_completions = set()
 
     for opp in active + archived:
+        opp_id = opp.get("id", "")
         stage_changes = opp.get("stageChanges") or []
+        
         for change in stage_changes:
             to_stage_id = change.get("toStageId")
             updated_at = change.get("updatedAt")
@@ -305,22 +323,26 @@ def build_data_summary(active, archived, postings_map):
             age_ms = now_ms - updated_at
             change_date = datetime.fromtimestamp(updated_at / 1000).strftime("%Y-%m-%d")
             
-            # Check if completed interview
-            completed_stage = completed_stage_lookup.get(to_stage_id)
+            # Check if this stage change indicates a COMPLETED interview (passed to next stage)
+            completed_stage = completed_markers.get(to_stage_id)
             if completed_stage:
-                if age_ms <= days_7_ms:
-                    interviews_completed["last_7_days"][completed_stage] += 1
-                if age_ms <= days_30_ms:
-                    interviews_completed["last_30_days"][completed_stage] += 1
-                    recent_interviews.append({
-                        "name": opp.get("name", "Unknown"),
-                        "role": get_role(opp, postings_map),
-                        "stage": completed_stage,
-                        "date": change_date,
-                        "days_ago": round(age_ms / (24 * 60 * 60 * 1000)),
-                    })
-                if age_ms <= days_90_ms:
-                    interviews_completed["last_90_days"][completed_stage] += 1
+                completion_key = f"{opp_id}:{completed_stage}"
+                if completion_key not in counted_completions:
+                    counted_completions.add(completion_key)
+                    if age_ms <= days_7_ms:
+                        interviews_completed["last_7_days"][completed_stage] += 1
+                    if age_ms <= days_30_ms:
+                        interviews_completed["last_30_days"][completed_stage] += 1
+                        recent_interviews.append({
+                            "name": opp.get("name", "Unknown"),
+                            "role": get_role(opp, postings_map),
+                            "stage_completed": completed_stage,
+                            "outcome": "passed",
+                            "date": change_date,
+                            "days_ago": round(age_ms / (24 * 60 * 60 * 1000)),
+                        })
+                    if age_ms <= days_90_ms:
+                        interviews_completed["last_90_days"][completed_stage] += 1
             
             # Check if scheduled interview
             scheduled_stage = scheduled_stage_lookup.get(to_stage_id)
@@ -329,11 +351,49 @@ def build_data_summary(active, archived, postings_map):
                     interviews_scheduled["last_7_days"][scheduled_stage] += 1
                 if age_ms <= days_30_ms:
                     interviews_scheduled["last_30_days"][scheduled_stage] += 1
+                    recent_scheduled.append({
+                        "name": opp.get("name", "Unknown"),
+                        "role": get_role(opp, postings_map),
+                        "stage": scheduled_stage,
+                        "date": change_date,
+                        "days_ago": round(age_ms / (24 * 60 * 60 * 1000)),
+                    })
                 if age_ms <= days_90_ms:
                     interviews_scheduled["last_90_days"][scheduled_stage] += 1
+        
+        # Check for archived candidates - they completed the interview but didn't pass
+        archived_info = opp.get("archived") or {}
+        if archived_info and archived_info.get("reason") != HIRED_REASON_ID:
+            archived_at = archived_info.get("archivedAt")
+            last_stage = opp.get("stage")
+            
+            if archived_at and last_stage:
+                interview_type = stage_to_interview_type.get(last_stage)
+                if interview_type:
+                    completion_key = f"{opp_id}:{interview_type}"
+                    if completion_key not in counted_completions:
+                        counted_completions.add(completion_key)
+                        age_ms = now_ms - archived_at
+                        change_date = datetime.fromtimestamp(archived_at / 1000).strftime("%Y-%m-%d")
+                        
+                        if age_ms <= days_7_ms:
+                            interviews_completed["last_7_days"][interview_type] += 1
+                        if age_ms <= days_30_ms:
+                            interviews_completed["last_30_days"][interview_type] += 1
+                            recent_interviews.append({
+                                "name": opp.get("name", "Unknown"),
+                                "role": get_role(opp, postings_map),
+                                "stage_completed": interview_type,
+                                "outcome": "rejected",
+                                "date": change_date,
+                                "days_ago": round(age_ms / (24 * 60 * 60 * 1000)),
+                            })
+                        if age_ms <= days_90_ms:
+                            interviews_completed["last_90_days"][interview_type] += 1
 
     # Sort recent interviews by date (most recent first)
     recent_interviews.sort(key=lambda x: x["date"], reverse=True)
+    recent_scheduled.sort(key=lambda x: x["date"], reverse=True)
 
     return {
         "pipeline": pipeline,
@@ -345,6 +405,7 @@ def build_data_summary(active, archived, postings_map):
         "interviews_completed": interviews_completed,
         "interviews_scheduled": interviews_scheduled,
         "recent_interviews": recent_interviews[:50],  # Limit to 50 most recent
+        "recent_scheduled": recent_scheduled[:50],  # Limit to 50 most recent
         "source_stats": source_stats,
         "total_active": len(active),
         "total_archived_365d": len(archived),
@@ -424,7 +485,9 @@ def main():
     
     # Stage activity
     completed = data.get('interviews_completed', {}).get('last_30_days', {})
-    print(f"  Last 30 days completed: {completed.get('Intro', 0)} intros, {completed.get('Technical', 0)} technicals, {completed.get('Onsite', 0)} onsites, {completed.get('Offer', 0)} offers")
+    scheduled = data.get('interviews_scheduled', {}).get('last_30_days', {})
+    print(f"  Last 30 days completed: {completed.get('Intro', 0)} intros, {completed.get('Technical', 0)} technicals, {completed.get('Onsite', 0)} onsites")
+    print(f"  Last 30 days scheduled: {scheduled.get('Intro', 0)} intros, {scheduled.get('Technical', 0)} technicals, {scheduled.get('Onsite', 0)} onsites")
     print()
     
     print("☁️ Updating Cloudflare KV cache...")
