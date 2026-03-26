@@ -55,6 +55,16 @@ def lever_request(endpoint, params=None):
     return response.json()
 
 
+def fetch_interviews(opp_id):
+    """Fetch interviews for an opportunity."""
+    try:
+        result = lever_request(f"opportunities/{opp_id}/interviews")
+        return result.get("data", [])
+    except Exception as e:
+        print(f"  Warning: Could not fetch interviews for {opp_id}: {e}")
+        return []
+
+
 def fetch_all_opportunities(archived=False):
     """Fetch all opportunities with pagination."""
     opportunities = []
@@ -150,6 +160,17 @@ def build_data_summary(active, archived, postings_map):
         "cb7dd941-ed9f-4803-9ed5-158681732b65": ("Onsite", "scheduled"),  # Onsite interview
     }
     
+    # Scheduled stage IDs (need to fetch interview dates for these)
+    scheduled_stage_ids = {
+        "fb6d2f07-aeab-4f1c-bf35-72f0cffa37f2",  # Introductory Call
+        "fae3d918-0118-4f17-b206-f7f29dca3bec",  # Technical Interview
+        "a57980a4-4fc4-4252-a0f2-e765e96cfee5",  # Technical #2
+        "cb7dd941-ed9f-4803-9ed5-158681732b65",  # Onsite interview
+    }
+    
+    print("📥 Fetching interview dates for scheduled candidates...")
+    scheduled_count = 0
+    
     for opp in active:
         stage_id = opp.get("stage")
         stage_group = get_stage_group(stage_id)
@@ -165,15 +186,32 @@ def build_data_summary(active, archived, postings_map):
         if created_at:
             days_in_process = round((now_ms - created_at) / (1000 * 60 * 60 * 24))
         
+        # Fetch interview date for scheduled candidates
+        interview_date = None
+        if stage_id in scheduled_stage_ids:
+            opp_id = opp.get("id")
+            if opp_id:
+                interviews = fetch_interviews(opp_id)
+                # Get the most recent/upcoming interview
+                for interview in interviews:
+                    interview_date_ms = interview.get("date")
+                    if interview_date_ms:
+                        interview_date = datetime.fromtimestamp(interview_date_ms / 1000).strftime("%Y-%m-%d")
+                        break
+                scheduled_count += 1
+        
         active_pipeline_candidates.append({
             "name": opp.get("name", "Unknown"),
             "role": get_role(opp, postings_map),
             "stage": stage_group,
             "status": status,  # "waiting", "scheduled", or "active"
+            "interview_date": interview_date,  # Actual interview date if scheduled
             "sources": (opp.get("sources") or [])[:1],
             "created_at": datetime.fromtimestamp(created_at / 1000).strftime("%Y-%m-%d") if created_at else None,
             "days_in_process": days_in_process,
         })
+    
+    print(f"✓ Fetched interview dates for {scheduled_count} candidates")
 
     # Offer details
     offer_stages = {"Offer", "Final Stages"}
@@ -460,12 +498,19 @@ def build_data_summary(active, archived, postings_map):
     for stage in waiting_to_schedule:
         waiting_to_schedule[stage].sort(key=lambda x: x.get("days_waiting") or 0, reverse=True)
     
-    # Group recent_scheduled by stage for easier display
+    # Build scheduled_by_stage from active_pipeline_candidates (with real interview dates)
     scheduled_by_stage = {"Onsite": [], "Technical": [], "Intro": []}
-    for item in recent_scheduled[:50]:
-        stage = item.get("stage")
-        if stage in scheduled_by_stage:
-            scheduled_by_stage[stage].append(item)
+    for cand in active_pipeline_candidates:
+        if cand.get("status") == "scheduled" and cand.get("stage") in scheduled_by_stage:
+            scheduled_by_stage[cand["stage"]].append({
+                "name": cand["name"],
+                "role": cand["role"],
+                "interview_date": cand.get("interview_date"),  # Real interview date
+            })
+    
+    # Sort by interview date (soonest first)
+    for stage in scheduled_by_stage:
+        scheduled_by_stage[stage].sort(key=lambda x: x.get("interview_date") or "9999-99-99")
     
     # Group recent_interviews by stage for easier display
     completed_by_stage = {"Onsite": [], "Technical": [], "Intro": [], "Final Stages": []}
