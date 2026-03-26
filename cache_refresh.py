@@ -153,7 +153,7 @@ def build_data_summary(active, archived, postings_map):
         group = get_stage_group(opp.get("stage"))
         if group not in offer_stages:
             continue
-        archived_info = opp.get("archived", {})
+        archived_info = opp.get("archived") or {}
         archived_at = archived_info.get("archivedAt")
         offer_details.append({
             "name": opp.get("name", "Unknown"),
@@ -165,9 +165,10 @@ def build_data_summary(active, archived, postings_map):
     # Hires
     hires = []
     for opp in archived:
-        if opp.get("archived", {}).get("reason") != HIRED_REASON_ID:
+        archived_info = opp.get("archived") or {}
+        if archived_info.get("reason") != HIRED_REASON_ID:
             continue
-        archived_at = opp.get("archived", {}).get("archivedAt")
+        archived_at = archived_info.get("archivedAt")
         hires.append({
             "name": opp.get("name", "Unknown"),
             "role": get_role(opp, postings_map),
@@ -192,7 +193,9 @@ def build_data_summary(active, archived, postings_map):
         
         if get_stage_group(opp.get("stage")) in hm_review_stages:
             source_stats[source]["past_hm_review"] += 1
-        if opp.get("archived", {}).get("reason") == HIRED_REASON_ID:
+        
+        archived_info = opp.get("archived") or {}
+        if archived_info.get("reason") == HIRED_REASON_ID:
             source_stats[source]["hired"] += 1
 
     return {
