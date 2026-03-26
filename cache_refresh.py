@@ -410,6 +410,7 @@ def build_data_summary(active, archived, postings_map):
                     if age_ms <= days_30_ms:
                         interviews_completed["last_30_days"][completed_stage] += 1
                         recent_interviews.append({
+                            "opp_id": opp_id,
                             "name": opp.get("name", "Unknown"),
                             "role": get_role(opp, postings_map),
                             "stage_completed": completed_stage,
@@ -457,6 +458,7 @@ def build_data_summary(active, archived, postings_map):
                         if age_ms <= days_30_ms:
                             interviews_completed["last_30_days"][interview_type] += 1
                             recent_interviews.append({
+                                "opp_id": opp_id,
                                 "name": opp.get("name", "Unknown"),
                                 "role": get_role(opp, postings_map),
                                 "stage_completed": interview_type,
@@ -513,11 +515,37 @@ def build_data_summary(active, archived, postings_map):
         scheduled_by_stage[stage].sort(key=lambda x: x.get("interview_date") or "9999-99-99")
     
     # Group recent_interviews by stage for easier display
+    # First, fetch real interview dates for Onsite completions (most important)
+    print("📥 Fetching interview dates for completed onsites...")
+    onsite_completions = [item for item in recent_interviews if item.get("stage_completed") == "Onsite"]
+    for item in onsite_completions[:20]:  # Limit to avoid too many API calls
+        opp_id = item.get("opp_id")
+        if opp_id:
+            interviews = fetch_interviews(opp_id)
+            # Find the most recent interview (likely the onsite)
+            for interview in sorted(interviews, key=lambda x: x.get("date", 0), reverse=True):
+                interview_date_ms = interview.get("date")
+                if interview_date_ms:
+                    item["interview_date"] = datetime.fromtimestamp(interview_date_ms / 1000).strftime("%Y-%m-%d")
+                    break
+    print(f"✓ Fetched interview dates for {len(onsite_completions)} completed onsites")
+    
     completed_by_stage = {"Onsite": [], "Technical": [], "Intro": [], "Final Stages": []}
     for item in recent_interviews[:50]:
         stage = item.get("stage_completed")
         if stage in completed_by_stage:
-            completed_by_stage[stage].append(item)
+            completed_by_stage[stage].append({
+                "name": item["name"],
+                "role": item["role"],
+                "stage_completed": stage,
+                "outcome": item["outcome"],
+                "date": item.get("interview_date") or item["date"],  # Use real date if available
+                "days_ago": item["days_ago"],
+            })
+    
+    # Sort completed by date (most recent first)
+    for stage in completed_by_stage:
+        completed_by_stage[stage].sort(key=lambda x: x.get("date") or "0000-00-00", reverse=True)
 
     return {
         "pipeline": pipeline,
