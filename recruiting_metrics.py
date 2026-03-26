@@ -504,22 +504,21 @@ def format_slack_message(metrics):
     offers = metrics.get("offer_acceptance_by_role", [])
     if offers:
         offer_text = f"*🎯 Offer Acceptance by Role* _(90 days)_\n```\n"
-        offer_text += f"{'Role':<30} {'Rate':>6} {'✅':>3} {'❌':>3}\n"
+        offer_text += f"{'Role':<30} {'Rate':>5} {'✅':>3} {'Tot':>4}\n"
         offer_text += "─" * 45 + "\n"
         
         for o in offers:
             role_name = o["role"][:29] if len(o["role"]) > 29 else o["role"]
             rate = f"{int(o['rate'])}%"
-            offer_text += f"{role_name:<30} {rate:>5} {o['accepted']:>3} {o['rejected']:>3}\n"
+            offer_text += f"{role_name:<30} {rate:>4} {o['accepted']:>3} {o['extended']:>4}\n"
         
         # Overall totals
         total_extended = sum(o["extended"] for o in offers)
         total_accepted = sum(o["accepted"] for o in offers)
-        total_rejected = sum(o["rejected"] for o in offers)
         overall_rate = (total_accepted / total_extended * 100) if total_extended > 0 else 0
         
         offer_text += "─" * 45 + "\n"
-        offer_text += f"{'Overall':<30} {int(overall_rate):>4}% {total_accepted:>3} {total_rejected:>3}\n"
+        offer_text += f"{'Overall':<30} {int(overall_rate):>3}% {total_accepted:>3} {total_extended:>4}\n"
         offer_text += "```"
         
         blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": offer_text}})
