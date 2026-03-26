@@ -270,8 +270,19 @@ def build_data_summary(active, archived, postings_map):
         "d03862a2-e446-4ade-bee6-4b200cf9b399": "Final Stages",  # Ref Check
     }
     
-    # Stage IDs for SCHEDULED interviews (moved to this stage = interview scheduled)
+    # Stage IDs for SCHEDULED interviews (moved to actual interview stage = interview is scheduled)
+    # "Schedule X" stages mean WAITING to schedule, not scheduled
     scheduled_stage_ids = {
+        "Intro": ["fb6d2f07-aeab-4f1c-bf35-72f0cffa37f2"],  # Introductory Call = intro is scheduled/happening
+        "Technical": [
+            "fae3d918-0118-4f17-b206-f7f29dca3bec",  # Technical Interview = technical is scheduled
+            "a57980a4-4fc4-4252-a0f2-e765e96cfee5",  # Technical Interview #2 = tech #2 is scheduled
+        ],
+        "Onsite": ["cb7dd941-ed9f-4803-9ed5-158681732b65"],  # Onsite interview = onsite is scheduled
+    }
+    
+    # Stage IDs for WAITING TO SCHEDULE (in scheduling stage, not yet scheduled)
+    waiting_to_schedule_ids = {
         "Intro": ["94d7f5df-ec0f-4061-b54d-bea369ace17b"],  # Schedule Intro Call
         "Technical": [
             "160000bb-2cba-40df-b9f0-f69c77cd6175",  # Schedule Technical Interview
@@ -285,6 +296,12 @@ def build_data_summary(active, archived, postings_map):
     for stage_name, ids in scheduled_stage_ids.items():
         for stage_id in ids:
             scheduled_stage_lookup[stage_id] = stage_name
+    
+    # Build reverse lookup for waiting to schedule
+    waiting_stage_lookup = {}
+    for stage_name, ids in waiting_to_schedule_ids.items():
+        for stage_id in ids:
+            waiting_stage_lookup[stage_id] = stage_name
 
     # Count completed interviews by time period
     interviews_completed = {
@@ -293,7 +310,7 @@ def build_data_summary(active, archived, postings_map):
         "last_90_days": {"Intro": 0, "Technical": 0, "Onsite": 0, "Final Stages": 0},
     }
     
-    # Count scheduled interviews by time period
+    # Count scheduled interviews by time period (entered actual interview stage)
     interviews_scheduled = {
         "last_7_days": {"Intro": 0, "Technical": 0, "Onsite": 0},
         "last_30_days": {"Intro": 0, "Technical": 0, "Onsite": 0},
@@ -305,6 +322,9 @@ def build_data_summary(active, archived, postings_map):
     
     # Recent scheduled interviews with candidate details
     recent_scheduled = []
+    
+    # Current candidates waiting to be scheduled (by checking current stage)
+    waiting_to_schedule = {"Intro": [], "Technical": [], "Onsite": []}
     
     # Track which candidates we've already counted for each stage (to avoid double counting)
     counted_completions = set()
@@ -395,6 +415,33 @@ def build_data_summary(active, archived, postings_map):
     recent_interviews.sort(key=lambda x: x["date"], reverse=True)
     recent_scheduled.sort(key=lambda x: x["date"], reverse=True)
     
+    # Populate waiting_to_schedule from active candidates in "Schedule X" stages
+    for opp in active:
+        current_stage = opp.get("stage")
+        waiting_stage = waiting_stage_lookup.get(current_stage)
+        if waiting_stage:
+            # Get when they entered this stage
+            stage_changes = opp.get("stageChanges") or []
+            entered_date = None
+            days_waiting = None
+            for change in stage_changes:
+                if change.get("toStageId") == current_stage:
+                    updated_at = change.get("updatedAt")
+                    if updated_at:
+                        entered_date = datetime.fromtimestamp(updated_at / 1000).strftime("%Y-%m-%d")
+                        days_waiting = round((now_ms - updated_at) / (24 * 60 * 60 * 1000))
+            
+            waiting_to_schedule[waiting_stage].append({
+                "name": opp.get("name", "Unknown"),
+                "role": get_role(opp, postings_map),
+                "waiting_since": entered_date,
+                "days_waiting": days_waiting,
+            })
+    
+    # Sort waiting lists by days_waiting (longest first)
+    for stage in waiting_to_schedule:
+        waiting_to_schedule[stage].sort(key=lambda x: x.get("days_waiting") or 0, reverse=True)
+    
     # Group recent_scheduled by stage for easier display
     scheduled_by_stage = {"Onsite": [], "Technical": [], "Intro": []}
     for item in recent_scheduled[:50]:
@@ -420,6 +467,7 @@ def build_data_summary(active, archived, postings_map):
         "interviews_scheduled": interviews_scheduled,
         "completed_by_stage": completed_by_stage,
         "scheduled_by_stage": scheduled_by_stage,
+        "waiting_to_schedule": waiting_to_schedule,
         "source_stats": source_stats,
         "total_active": len(active),
         "total_archived_365d": len(archived),
@@ -500,8 +548,10 @@ def main():
     # Stage activity
     completed = data.get('interviews_completed', {}).get('last_30_days', {})
     scheduled = data.get('interviews_scheduled', {}).get('last_30_days', {})
+    waiting = data.get('waiting_to_schedule', {})
     print(f"  Last 30 days completed: {completed.get('Intro', 0)} intros, {completed.get('Technical', 0)} technicals, {completed.get('Onsite', 0)} onsites")
     print(f"  Last 30 days scheduled: {scheduled.get('Intro', 0)} intros, {scheduled.get('Technical', 0)} technicals, {scheduled.get('Onsite', 0)} onsites")
+    print(f"  Waiting to schedule: {len(waiting.get('Intro', []))} intros, {len(waiting.get('Technical', []))} technicals, {len(waiting.get('Onsite', []))} onsites")
     print()
     
     print("☁️ Updating Cloudflare KV cache...")
