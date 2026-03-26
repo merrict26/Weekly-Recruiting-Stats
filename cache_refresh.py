@@ -734,12 +734,23 @@ def build_data_summary(active, archived, postings_map):
                 funnel_90d["passed_onsite"].add(opp_id)
     
     # Track onsite failures: completed onsite (in Debrief/Ref Check) but got rejected
-    onsite_failures = []
+    # And track withdrawals separately from rejections
+    onsite_outcomes = {
+        "rejected": [],      # Company said no
+        "withdrew": [],      # Candidate withdrew before offer
+        "declined_offer": [], # Got offer but said no
+        "pending": [],       # Still in process (Debrief/Ref/Offer)
+    }
+    
+    # Common archive reason IDs (may need to verify these for zaimler's Lever)
+    # We'll capture the reason text too for transparency
+    
     for opp in archived:
         opp_id = opp.get("id", "")
         archived_info = opp.get("archived") or {}
         archived_at = archived_info.get("archivedAt")
-        reason = archived_info.get("reason")
+        reason_id = archived_info.get("reason")
+        reason_text = archived_info.get("reasonText", "Unknown")
         last_stage = opp.get("stage")
         name = opp.get("name", "Unknown")
         role = get_role(opp, postings_map)
@@ -747,28 +758,80 @@ def build_data_summary(active, archived, postings_map):
         if not archived_at or (now_ms - archived_at) > days_90_ms:
             continue
         
-        # Rejected from Debrief or Ref Check = failed onsite
-        if last_stage in [debrief_id, ref_check_id] and reason != HIRED_REASON_ID:
-            archived_date = datetime.fromtimestamp(archived_at / 1000).strftime("%Y-%m-%d")
-            onsite_failures.append({
-                "name": name,
-                "role": role,
-                "stage": "Debrief" if last_stage == debrief_id else "References",
-                "date": archived_date,
-            })
-            # Make sure they're counted in did_onsite
-            funnel_90d["did_onsite"][opp_id] = {"name": name, "role": role}
+        archived_date = datetime.fromtimestamp(archived_at / 1000).strftime("%Y-%m-%d")
         
-        # Also check if rejected from Onsite stage itself (never made it to Debrief)
-        if last_stage == onsite_interview_id and reason != HIRED_REASON_ID:
-            archived_date = datetime.fromtimestamp(archived_at / 1000).strftime("%Y-%m-%d")
-            onsite_failures.append({
-                "name": name,
-                "role": role,
-                "stage": "Onsite",
-                "date": archived_date,
-            })
+        # Check if they completed an onsite (reached Debrief, Ref Check, or Offer)
+        stage_changes = opp.get("stageChanges") or []
+        reached_post_onsite = False
+        reached_offer = False
+        for change in stage_changes:
+            to_stage = change.get("toStageId")
+            if to_stage in post_onsite_stages:
+                reached_post_onsite = True
+            if to_stage == offer_id:
+                reached_offer = True
+        
+        # Also check if they were in onsite stage itself when archived
+        was_in_onsite = last_stage == onsite_interview_id
+        
+        if not reached_post_onsite and not was_in_onsite:
+            continue  # Didn't complete onsite
+        
+        # Make sure they're counted in did_onsite
+        funnel_90d["did_onsite"][opp_id] = {"name": name, "role": role}
+        
+        outcome_entry = {
+            "name": name,
+            "role": role,
+            "stage": last_stage,
+            "date": archived_date,
+            "reason": reason_text,
+        }
+        
+        if reason_id == HIRED_REASON_ID:
+            # They were hired - tracked separately
+            funnel_90d["passed_onsite"].add(opp_id)
+            continue
+        
+        # Categorize by reason text (common patterns)
+        reason_lower = reason_text.lower() if reason_text else ""
+        
+        if reached_offer:
+            # They got to offer stage but didn't accept
+            if "withdrew" in reason_lower or "withdraw" in reason_lower or "dropped out" in reason_lower:
+                onsite_outcomes["withdrew"].append(outcome_entry)
+            else:
+                # Assume declined offer if they reached offer but not hired
+                onsite_outcomes["declined_offer"].append(outcome_entry)
+        elif "withdrew" in reason_lower or "withdraw" in reason_lower or "dropped out" in reason_lower or "not interested" in reason_lower or "accepted another" in reason_lower:
+            # Withdrew before offer
+            onsite_outcomes["withdrew"].append(outcome_entry)
+        else:
+            # Company rejected
+            onsite_outcomes["rejected"].append(outcome_entry)
+    
+    # Track active candidates still in post-onsite stages
+    for opp in active:
+        stage_id = opp.get("stage")
+        if stage_id in [debrief_id, ref_check_id, offer_id]:
+            name = opp.get("name", "Unknown")
+            role = get_role(opp, postings_map)
+            opp_id = opp.get("id", "")
             funnel_90d["did_onsite"][opp_id] = {"name": name, "role": role}
+            
+            # Check if recent (last 90 days)
+            stage_changes = opp.get("stageChanges") or []
+            for change in stage_changes:
+                if change.get("toStageId") in post_onsite_stages:
+                    updated_at = change.get("updatedAt")
+                    if updated_at and (now_ms - updated_at) <= days_90_ms:
+                        stage_name = "Debrief" if stage_id == debrief_id else "References" if stage_id == ref_check_id else "Offer"
+                        onsite_outcomes["pending"].append({
+                            "name": name,
+                            "role": role,
+                            "stage": stage_name,
+                        })
+                        break
     
     # Count offers extended, accepted, declined from archived candidates
     for opp in archived:
@@ -819,10 +882,13 @@ def build_data_summary(active, archived, postings_map):
         "onsite_to_offer": {
             "did_onsite": total_did_onsite,
             "passed": total_passed_onsite,
-            "failed": total_did_onsite - total_passed_onsite,
+            "rejected": len(onsite_outcomes["rejected"]),
+            "withdrew": len(onsite_outcomes["withdrew"]),
+            "declined_offer": len(onsite_outcomes["declined_offer"]),
+            "pending": len(onsite_outcomes["pending"]),
             "rate": round(total_passed_onsite / max(total_did_onsite, 1) * 100, 1),
         },
-        "onsite_failures": onsite_failures,  # List of who failed
+        "onsite_outcomes": onsite_outcomes,  # Detailed breakdown with names
         "offer_acceptance": {
             "extended": funnel_90d["offers_extended"],
             "accepted": funnel_90d["offers_accepted"],
@@ -833,7 +899,7 @@ def build_data_summary(active, archived, postings_map):
     }
     
     print(f"✓ Funnel: {funnel_stats['intro_to_technical']['rate']}% intro→tech, {funnel_stats['technical_to_onsite']['rate']}% tech→onsite, {funnel_stats['onsite_to_offer']['rate']}% onsite→offer")
-    print(f"  Onsite failures: {len(onsite_failures)}")
+    print(f"  Post-onsite: {len(onsite_outcomes['rejected'])} rejected, {len(onsite_outcomes['withdrew'])} withdrew, {len(onsite_outcomes['declined_offer'])} declined offer, {len(onsite_outcomes['pending'])} pending")
 
     return {
         "pipeline": pipeline,
