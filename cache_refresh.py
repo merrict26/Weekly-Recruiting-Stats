@@ -177,9 +177,14 @@ def build_data_summary(active, archived, postings_map):
         if stage_group not in pipeline_stages:
             continue
         
-        # Get specific status
+        # Get specific status AND the correct stage from our explicit mapping
         status_info = stage_status_map.get(stage_id)
-        status = status_info[1] if status_info else "active"
+        if status_info:
+            stage_for_candidate = status_info[0]  # Use stage from our explicit mapping (handles Tech #2 correctly)
+            status = status_info[1]
+        else:
+            stage_for_candidate = stage_group
+            status = "active"
         
         created_at = opp.get("createdAt")
         days_in_process = None
@@ -203,7 +208,7 @@ def build_data_summary(active, archived, postings_map):
         active_pipeline_candidates.append({
             "name": opp.get("name", "Unknown"),
             "role": get_role(opp, postings_map),
-            "stage": stage_group,
+            "stage": stage_for_candidate,  # Use the corrected stage
             "status": status,  # "waiting", "scheduled", or "active"
             "interview_date": interview_date,  # Actual interview date if scheduled
             "sources": (opp.get("sources") or [])[:1],
