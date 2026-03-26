@@ -63,7 +63,7 @@ def fetch_all_opportunities(archived=False):
     pages = 0
 
     while has_next:
-        params = {"limit": 100, "expand": "applications,stageChanges"}
+        params = {"limit": 100, "expand": "applications"}
         if archived:
             params["archived"] = "true"
             # Fetch last 365 days for historical analysis
