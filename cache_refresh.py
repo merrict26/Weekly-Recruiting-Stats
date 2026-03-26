@@ -13,10 +13,10 @@ from collections import defaultdict
 from datetime import datetime, timedelta
 
 # Environment variables
-LEVER_API_KEY = os.environ["LEVER_API_KEY"]
-CF_ACCOUNT_ID = os.environ["CF_ACCOUNT_ID"]
-CF_API_TOKEN = os.environ["CF_API_TOKEN"]
-CF_KV_NAMESPACE_ID = os.environ["CF_KV_NAMESPACE_ID"]
+LEVER_API_KEY = os.environ.get("LEVER_API_KEY", "")
+CF_ACCOUNT_ID = os.environ.get("CF_ACCOUNT_ID", "")
+CF_API_TOKEN = os.environ.get("CF_API_TOKEN", "")
+CF_KV_NAMESPACE_ID = os.environ.get("CF_KV_NAMESPACE_ID", "")
 
 HIRED_REASON_ID = "7fbd076c-7224-415a-bf96-ebd45b9a70dc"
 
@@ -213,13 +213,26 @@ def build_data_summary(active, archived, postings_map):
 
 def update_kv_cache(data):
     """Update Cloudflare KV cache."""
+    # Check env vars
+    if not CF_ACCOUNT_ID:
+        raise ValueError("CF_ACCOUNT_ID is not set")
+    if not CF_KV_NAMESPACE_ID:
+        raise ValueError("CF_KV_NAMESPACE_ID is not set")
+    if not CF_API_TOKEN:
+        raise ValueError("CF_API_TOKEN is not set")
+    
+    # Debug: show first/last chars of IDs
+    print(f"  Account ID length: {len(CF_ACCOUNT_ID)}, starts with: {CF_ACCOUNT_ID[:8]}...")
+    print(f"  Namespace ID length: {len(CF_KV_NAMESPACE_ID)}, value: {CF_KV_NAMESPACE_ID}")
+    
     url = f"https://api.cloudflare.com/client/v4/accounts/{CF_ACCOUNT_ID}/storage/kv/namespaces/{CF_KV_NAMESPACE_ID}/values/lever_data"
+    print(f"  URL: {url[:60]}...")
     
     response = requests.put(
         url,
         headers={
             "Authorization": f"Bearer {CF_API_TOKEN}",
-            "Content-Type": "application/json",
+            "Content-Type": "text/plain",
         },
         data=json.dumps(data),
     )
@@ -234,6 +247,10 @@ def update_kv_cache(data):
 def main():
     print("🔄 Starting full cache refresh...")
     print()
+    
+    # Validate required env vars
+    if not LEVER_API_KEY:
+        raise ValueError("LEVER_API_KEY is not set")
     
     print("📥 Fetching active candidates...")
     active = fetch_all_opportunities(archived=False)
