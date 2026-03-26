@@ -66,8 +66,9 @@ def fetch_all_opportunities(archived=False):
         params = {"limit": 100, "expand": "applications"}
         if archived:
             params["archived"] = "true"
-            ninety_days_ago = int((datetime.now() - timedelta(days=90)).timestamp() * 1000)
-            params["archived_at_start"] = ninety_days_ago
+            # Fetch last 365 days for historical analysis
+            one_year_ago = int((datetime.now() - timedelta(days=365)).timestamp() * 1000)
+            params["archived_at_start"] = one_year_ago
         else:
             params["archived"] = "false"
 
@@ -135,15 +136,25 @@ def build_data_summary(active, archived, postings_map):
     # Active pipeline candidates (HM Review+)
     pipeline_stages = {"Hiring Manager Review", "Intro", "Technical", "Onsite", "Final Stages", "Offer"}
     active_pipeline_candidates = []
+    now_ms = datetime.now().timestamp() * 1000
+    
     for opp in active:
         stage = get_stage_group(opp.get("stage"))
         if stage not in pipeline_stages:
             continue
+        
+        created_at = opp.get("createdAt")
+        days_in_process = None
+        if created_at:
+            days_in_process = round((now_ms - created_at) / (1000 * 60 * 60 * 24))
+        
         active_pipeline_candidates.append({
             "name": opp.get("name", "Unknown"),
             "role": get_role(opp, postings_map),
             "stage": stage,
             "sources": (opp.get("sources") or [])[:1],
+            "created_at": datetime.fromtimestamp(created_at / 1000).strftime("%Y-%m-%d") if created_at else None,
+            "days_in_process": days_in_process,
         })
 
     # Offer details
@@ -155,24 +166,43 @@ def build_data_summary(active, archived, postings_map):
             continue
         archived_info = opp.get("archived") or {}
         archived_at = archived_info.get("archivedAt")
+        created_at = opp.get("createdAt")
+        
+        # Calculate days in process
+        days_in_process = None
+        if archived_at and created_at:
+            days_in_process = round((archived_at - created_at) / (1000 * 60 * 60 * 24))
+        
         offer_details.append({
             "name": opp.get("name", "Unknown"),
             "role": get_role(opp, postings_map),
             "accepted": archived_info.get("reason") == HIRED_REASON_ID,
             "archived_at": datetime.fromtimestamp(archived_at / 1000).strftime("%Y-%m-%d") if archived_at else None,
+            "created_at": datetime.fromtimestamp(created_at / 1000).strftime("%Y-%m-%d") if created_at else None,
+            "days_in_process": days_in_process,
         })
 
-    # Hires
+    # Hires (with time to hire)
     hires = []
     for opp in archived:
         archived_info = opp.get("archived") or {}
         if archived_info.get("reason") != HIRED_REASON_ID:
             continue
         archived_at = archived_info.get("archivedAt")
+        created_at = opp.get("createdAt")
+        
+        # Calculate days to hire
+        days_to_hire = None
+        if archived_at and created_at:
+            days_to_hire = round((archived_at - created_at) / (1000 * 60 * 60 * 24))
+        
         hires.append({
             "name": opp.get("name", "Unknown"),
             "role": get_role(opp, postings_map),
             "hired_date": datetime.fromtimestamp(archived_at / 1000).strftime("%Y-%m-%d") if archived_at else None,
+            "created_date": datetime.fromtimestamp(created_at / 1000).strftime("%Y-%m-%d") if created_at else None,
+            "days_to_hire": days_to_hire,
+            "sources": (opp.get("sources") or [])[:1],
         })
 
     # Source stats
@@ -198,15 +228,26 @@ def build_data_summary(active, archived, postings_map):
         if archived_info.get("reason") == HIRED_REASON_ID:
             source_stats[source]["hired"] += 1
 
+    # Time to hire stats
+    hire_times = [h["days_to_hire"] for h in hires if h.get("days_to_hire") is not None]
+    time_to_hire_stats = {
+        "avg_days": round(sum(hire_times) / len(hire_times)) if hire_times else None,
+        "min_days": min(hire_times) if hire_times else None,
+        "max_days": max(hire_times) if hire_times else None,
+        "total_hires_measured": len(hire_times),
+    }
+
     return {
         "pipeline": pipeline,
         "active_by_role": active_by_role,
         "active_pipeline_candidates": active_pipeline_candidates,
         "offer_details": offer_details,
         "hires": hires,
+        "time_to_hire_stats": time_to_hire_stats,
         "source_stats": source_stats,
         "total_active": len(active),
-        "total_archived_90d": len(archived),
+        "total_archived_365d": len(archived),
+        "archived_since": (datetime.now() - timedelta(days=365)).strftime("%Y-%m-%d"),
         "cached_at": datetime.utcnow().isoformat() + "Z",
     }
 
@@ -257,7 +298,7 @@ def main():
     print(f"✓ {len(active)} active candidates")
     print()
     
-    print("📥 Fetching archived candidates (90 days)...")
+    print("📥 Fetching archived candidates (365 days)...")
     archived = fetch_all_opportunities(archived=True)
     print(f"✓ {len(archived)} archived candidates")
     print()
@@ -276,6 +317,9 @@ def main():
     print(f"  Pipeline candidates: {sum(data['pipeline'].get(s, 0) for s in ['Hiring Manager Review', 'Intro', 'Technical', 'Onsite', 'Final Stages', 'Offer'])}")
     print(f"  Offers made: {len(data['offer_details'])}")
     print(f"  Hires: {len(data['hires'])}")
+    tth = data.get('time_to_hire_stats', {})
+    if tth.get('avg_days'):
+        print(f"  Avg time to hire: {tth['avg_days']} days (range: {tth['min_days']}-{tth['max_days']})")
     print()
     
     print("☁️ Updating Cloudflare KV cache...")
