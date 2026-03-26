@@ -394,6 +394,20 @@ def build_data_summary(active, archived, postings_map):
     # Sort recent interviews by date (most recent first)
     recent_interviews.sort(key=lambda x: x["date"], reverse=True)
     recent_scheduled.sort(key=lambda x: x["date"], reverse=True)
+    
+    # Group recent_scheduled by stage for easier display
+    scheduled_by_stage = {"Onsite": [], "Technical": [], "Intro": []}
+    for item in recent_scheduled[:50]:
+        stage = item.get("stage")
+        if stage in scheduled_by_stage:
+            scheduled_by_stage[stage].append(item)
+    
+    # Group recent_interviews by stage for easier display
+    completed_by_stage = {"Onsite": [], "Technical": [], "Intro": [], "Final Stages": []}
+    for item in recent_interviews[:50]:
+        stage = item.get("stage_completed")
+        if stage in completed_by_stage:
+            completed_by_stage[stage].append(item)
 
     return {
         "pipeline": pipeline,
@@ -404,8 +418,8 @@ def build_data_summary(active, archived, postings_map):
         "time_to_hire_stats": time_to_hire_stats,
         "interviews_completed": interviews_completed,
         "interviews_scheduled": interviews_scheduled,
-        "recent_interviews": recent_interviews[:50],  # Limit to 50 most recent
-        "recent_scheduled": recent_scheduled[:50],  # Limit to 50 most recent
+        "completed_by_stage": completed_by_stage,
+        "scheduled_by_stage": scheduled_by_stage,
         "source_stats": source_stats,
         "total_active": len(active),
         "total_archived_365d": len(archived),
