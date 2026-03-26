@@ -627,6 +627,14 @@ def main():
 
     # Offer acceptance by role (90 days)
     offer_acceptance_by_role = calculate_offer_acceptance_by_role(archived_opportunities, postings_map)
+    
+    # Debug: Print offer details
+    print("\n=== OFFER DETAILS (for verification) ===")
+    for o in offer_acceptance_by_role:
+        print(f"\n{o['role']}:")
+        for c in o["candidates"]:
+            print(f"  {c['status']} {c['name']}")
+    print("=========================================\n")
 
     metrics = {
         "time_to_hire": time_to_hire,
