@@ -154,10 +154,35 @@ def get_archive_reasons():
     return reasons_map
 
 
-def get_open_postings():
-    """Fetch all published job postings."""
-    result = lever_request("postings", {"state": "published", "limit": 100})
-    return result.get("data", [])
+def get_all_postings():
+    """Fetch all job postings (published and closed)."""
+    postings = []
+    has_next = True
+    offset = None
+    
+    # Fetch published postings
+    while has_next:
+        params = {"state": "published", "limit": 100}
+        if offset:
+            params["offset"] = offset
+        result = lever_request("postings", params)
+        postings.extend(result.get("data", []))
+        has_next = result.get("hasNext", False)
+        offset = result.get("next")
+    
+    # Also fetch closed postings (for archived candidates)
+    has_next = True
+    offset = None
+    while has_next:
+        params = {"state": "closed", "limit": 100}
+        if offset:
+            params["offset"] = offset
+        result = lever_request("postings", params)
+        postings.extend(result.get("data", []))
+        has_next = result.get("hasNext", False)
+        offset = result.get("next")
+    
+    return postings
 
 
 def get_stage_group(stage_id):
@@ -337,7 +362,7 @@ def calculate_source_effectiveness(active_opportunities, archived_opportunities)
     return results
 
 
-def calculate_offer_acceptance_by_role(archived_opportunities):
+def calculate_offer_acceptance_by_role(archived_opportunities, postings_map):
     """
     Calculate offer acceptance/rejection by position.
     Tracks candidates who reached Offer stage or Final Stages.
@@ -359,11 +384,12 @@ def calculate_offer_acceptance_by_role(archived_opportunities):
         role = "Unknown Role"
         apps = opp.get("applications", [])
         if apps:
-            posting = apps[0].get("posting", {})
+            posting = apps[0].get("posting")
             if isinstance(posting, dict):
                 role = posting.get("text", "Unknown Role")
             elif isinstance(posting, str):
-                role = posting
+                # It's a posting ID - look up in map
+                role = postings_map.get(posting, posting[:20] + "...")
         
         candidate_name = opp.get("name", "Unknown")
         archived_info = opp.get("archived", {})
@@ -575,6 +601,13 @@ def main():
     archived_opportunities = get_archived_opportunities_since(since_date_90)
     print(f"Found {len(archived_opportunities)} archived candidates in last {LOOKBACK_DAYS_LONG} days")
 
+    # Fetch all postings and build lookup map
+    postings = get_all_postings()
+    print(f"Found {len(postings)} postings")
+    postings_map = {}
+    for p in postings:
+        postings_map[p.get("id")] = p.get("text", "Unknown Role")
+
     # Calculate metrics
     print("Calculating metrics...")
 
@@ -594,7 +627,7 @@ def main():
     source_effectiveness = calculate_source_effectiveness(active_opportunities, archived_30d)
 
     # Offer acceptance by role (90 days)
-    offer_acceptance_by_role = calculate_offer_acceptance_by_role(archived_opportunities)
+    offer_acceptance_by_role = calculate_offer_acceptance_by_role(archived_opportunities, postings_map)
 
     metrics = {
         "time_to_hire": time_to_hire,
