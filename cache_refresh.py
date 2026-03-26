@@ -642,6 +642,7 @@ def build_data_summary(active, archived, postings_map):
     print("📊 Calculating funnel conversion stats...")
     
     days_90_ms = 90 * 24 * 60 * 60 * 1000
+    days_365_ms = 365 * 24 * 60 * 60 * 1000
     
     # Stage IDs for funnel tracking
     debrief_id = "359f9594-ada0-4ca2-bec2-8b3f7eb2106a"
@@ -654,7 +655,7 @@ def build_data_summary(active, archived, postings_map):
     # All post-onsite stages (completing onsite = entering any of these)
     post_onsite_stages = {debrief_id, ref_check_id, offer_id}
     
-    # Track candidates through the funnel (last 90 days)
+    # Track candidates through the funnel for both 90 days and 365 days
     # Use candidate names to deduplicate (same person may have multiple opportunities)
     funnel_90d = {
         "did_intro": {},        # name -> candidate info
@@ -669,6 +670,17 @@ def build_data_summary(active, archived, postings_map):
         "offers_declined": 0,
     }
     
+    funnel_365d = {
+        "passed_intro": set(),
+        "passed_technical": set(),
+        "did_onsite": {},
+        "passed_onsite": set(),
+        "reached_offer": set(),
+        "offers_extended": 0,
+        "offers_accepted": 0,
+        "offers_declined": 0,
+    }
+    
     for opp in active + archived:
         opp_id = opp.get("id", "")
         stage_changes = opp.get("stageChanges") or []
@@ -677,31 +689,34 @@ def build_data_summary(active, archived, postings_map):
         name = opp.get("name", "Unknown")
         role = get_role(opp, postings_map)
         
-        # Check if any stage change happened in last 90 days
-        recent_activity = False
+        # Check if any stage change happened in last 365 days
+        recent_365d = False
+        recent_90d = False
         for change in stage_changes:
             updated_at = change.get("updatedAt")
-            if updated_at and (now_ms - updated_at) <= days_90_ms:
-                recent_activity = True
-                break
+            if updated_at:
+                if (now_ms - updated_at) <= days_90_ms:
+                    recent_90d = True
+                    recent_365d = True
+                elif (now_ms - updated_at) <= days_365_ms:
+                    recent_365d = True
         
-        if not recent_activity:
+        if not recent_365d:
             continue
         
         # Track what stages they went through
-        did_intro = False
-        did_technical = False
-        did_onsite = False
-        reached_debrief_or_later = False
-        reached_offer = False
-        
         for change in stage_changes:
             to_stage_id = change.get("toStageId")
             updated_at = change.get("updatedAt")
             
             if not to_stage_id or not updated_at:
                 continue
-            if (now_ms - updated_at) > days_90_ms:
+            
+            age_ms = now_ms - updated_at
+            is_90d = age_ms <= days_90_ms
+            is_365d = age_ms <= days_365_ms
+            
+            if not is_365d:
                 continue
             
             # Did intro = entered technical stage (Schedule Technical, Technical, Tech #2)
@@ -710,8 +725,9 @@ def build_data_summary(active, archived, postings_map):
                 scheduled_stage_ids.get("Technical", [])
             )
             if to_stage_id in tech_stage_ids:
-                did_intro = True
-                funnel_90d["passed_intro"].add(name)
+                funnel_365d["passed_intro"].add(name)
+                if is_90d:
+                    funnel_90d["passed_intro"].add(name)
             
             # Did technical = entered onsite stage (Schedule Onsite, Onsite)
             onsite_stage_ids = (
@@ -719,20 +735,23 @@ def build_data_summary(active, archived, postings_map):
                 scheduled_stage_ids.get("Onsite", [])
             )
             if to_stage_id in onsite_stage_ids:
-                did_technical = True
-                funnel_90d["passed_technical"].add(name)
+                funnel_365d["passed_technical"].add(name)
+                if is_90d:
+                    funnel_90d["passed_technical"].add(name)
             
             # Did onsite = entered post-onsite stage (Debrief, Ref Check, Offer)
             if to_stage_id in post_onsite_stages:
-                did_onsite = True
-                reached_debrief_or_later = True
-                funnel_90d["did_onsite"][name] = {"name": name, "role": role}
+                funnel_365d["did_onsite"][name] = {"name": name, "role": role}
+                if is_90d:
+                    funnel_90d["did_onsite"][name] = {"name": name, "role": role}
             
             # Reached offer
             if to_stage_id == offer_id:
-                reached_offer = True
-                funnel_90d["reached_offer"].add(name)
-                funnel_90d["passed_onsite"].add(name)
+                funnel_365d["reached_offer"].add(name)
+                funnel_365d["passed_onsite"].add(name)
+                if is_90d:
+                    funnel_90d["reached_offer"].add(name)
+                    funnel_90d["passed_onsite"].add(name)
     
     # Track onsite failures: completed onsite (in Debrief/Ref Check) but got rejected
     # And track withdrawals separately from rejections
@@ -851,7 +870,8 @@ def build_data_summary(active, archived, postings_map):
     
     # Count offers extended, accepted, declined from archived candidates
     # Deduplicate by candidate name (same person may have multiple opportunities)
-    offer_candidates_seen = set()
+    offer_candidates_seen_90d = set()
+    offer_candidates_seen_365d = set()
     
     for opp in archived:
         opp_id = opp.get("id", "")
@@ -860,7 +880,14 @@ def build_data_summary(active, archived, postings_map):
         archived_at = archived_info.get("archivedAt")
         reason = archived_info.get("reason")
         
-        if not archived_at or (now_ms - archived_at) > days_90_ms:
+        if not archived_at:
+            continue
+        
+        age_ms = now_ms - archived_at
+        is_90d = age_ms <= days_90_ms
+        is_365d = age_ms <= days_365_ms
+        
+        if not is_365d:
             continue
         
         # Check if they were in offer stage
@@ -871,24 +898,39 @@ def build_data_summary(active, archived, postings_map):
                 was_in_offer = True
                 break
         
-        if was_in_offer and name not in offer_candidates_seen:
-            offer_candidates_seen.add(name)
-            funnel_90d["offers_extended"] += 1
-            if reason == HIRED_REASON_ID:
-                funnel_90d["offers_accepted"] += 1
-            else:
-                funnel_90d["offers_declined"] += 1
+        if was_in_offer:
+            # 365-day tracking
+            if name not in offer_candidates_seen_365d:
+                offer_candidates_seen_365d.add(name)
+                funnel_365d["offers_extended"] += 1
+                if reason == HIRED_REASON_ID:
+                    funnel_365d["offers_accepted"] += 1
+                else:
+                    funnel_365d["offers_declined"] += 1
+            
+            # 90-day tracking
+            if is_90d and name not in offer_candidates_seen_90d:
+                offer_candidates_seen_90d.add(name)
+                funnel_90d["offers_extended"] += 1
+                if reason == HIRED_REASON_ID:
+                    funnel_90d["offers_accepted"] += 1
+                else:
+                    funnel_90d["offers_declined"] += 1
     
     # Also count active candidates currently in offer stage
     for opp in active:
         name = opp.get("name", "Unknown")
-        if opp.get("stage") == offer_id and name not in offer_candidates_seen:
-            offer_candidates_seen.add(name)
-            funnel_90d["offers_extended"] += 1
+        if opp.get("stage") == offer_id:
+            if name not in offer_candidates_seen_90d:
+                offer_candidates_seen_90d.add(name)
+                funnel_90d["offers_extended"] += 1
+            if name not in offer_candidates_seen_365d:
+                offer_candidates_seen_365d.add(name)
+                funnel_365d["offers_extended"] += 1
     
-    # Calculate conversion rates
-    total_did_onsite = len(funnel_90d["did_onsite"])
-    total_passed_onsite = len(funnel_90d["passed_onsite"])
+    # Calculate conversion rates for 90 days
+    total_did_onsite_90d = len(funnel_90d["did_onsite"])
+    total_passed_onsite_90d = len(funnel_90d["passed_onsite"])
     
     funnel_stats = {
         "period": "last_90_days",
@@ -903,13 +945,13 @@ def build_data_summary(active, archived, postings_map):
             "rate": round(len(funnel_90d["passed_technical"]) / max(interviews_completed["last_90_days"]["Technical"], 1) * 100, 1),
         },
         "onsite_to_offer": {
-            "did_onsite": total_did_onsite,
-            "passed": total_passed_onsite,
+            "did_onsite": total_did_onsite_90d,
+            "passed": total_passed_onsite_90d,
             "rejected": len(onsite_outcomes["rejected"]),
             "withdrew": len(onsite_outcomes["withdrew"]),
             "declined_offer": len(onsite_outcomes["declined_offer"]),
             "pending": len(onsite_outcomes["pending"]),
-            "rate": round(total_passed_onsite / max(total_did_onsite, 1) * 100, 1),
+            "rate": round(total_passed_onsite_90d / max(total_did_onsite_90d, 1) * 100, 1),
         },
         "onsite_outcomes": onsite_outcomes,  # Detailed breakdown with names
         "offer_acceptance": {
@@ -921,7 +963,36 @@ def build_data_summary(active, archived, postings_map):
         },
     }
     
-    print(f"✓ Funnel: {funnel_stats['intro_to_technical']['rate']}% intro→tech, {funnel_stats['technical_to_onsite']['rate']}% tech→onsite, {funnel_stats['onsite_to_offer']['rate']}% onsite→offer")
+    # Calculate conversion rates for 365 days
+    total_did_onsite_365d = len(funnel_365d["did_onsite"])
+    total_passed_onsite_365d = len(funnel_365d["passed_onsite"])
+    
+    funnel_stats_365d = {
+        "period": "last_365_days",
+        "intro_to_technical": {
+            "passed": len(funnel_365d["passed_intro"]),
+            "rate_note": "Total who passed intro (no denominator available for 365d)",
+        },
+        "technical_to_onsite": {
+            "passed": len(funnel_365d["passed_technical"]),
+            "rate_note": "Total who passed technical (no denominator available for 365d)",
+        },
+        "onsite_to_offer": {
+            "did_onsite": total_did_onsite_365d,
+            "passed": total_passed_onsite_365d,
+            "rate": round(total_passed_onsite_365d / max(total_did_onsite_365d, 1) * 100, 1),
+        },
+        "offer_acceptance": {
+            "extended": funnel_365d["offers_extended"],
+            "accepted": funnel_365d["offers_accepted"],
+            "declined": funnel_365d["offers_declined"],
+            "pending": funnel_365d["offers_extended"] - funnel_365d["offers_accepted"] - funnel_365d["offers_declined"],
+            "acceptance_rate": round(funnel_365d["offers_accepted"] / max(funnel_365d["offers_accepted"] + funnel_365d["offers_declined"], 1) * 100, 1),
+        },
+    }
+    
+    print(f"✓ Funnel 90d: {funnel_stats['intro_to_technical']['rate']}% intro→tech, {funnel_stats['technical_to_onsite']['rate']}% tech→onsite, {funnel_stats['onsite_to_offer']['rate']}% onsite→offer")
+    print(f"✓ Funnel 365d: {len(funnel_365d['passed_intro'])} passed intro, {len(funnel_365d['passed_technical'])} passed tech, {funnel_stats_365d['onsite_to_offer']['rate']}% onsite→offer")
     print(f"  Post-onsite: {len(onsite_outcomes['rejected'])} rejected, {len(onsite_outcomes['withdrew'])} withdrew, {len(onsite_outcomes['declined_offer'])} declined offer, {len(onsite_outcomes['pending'])} pending")
 
     return {
@@ -937,6 +1008,7 @@ def build_data_summary(active, archived, postings_map):
         "scheduled_by_stage": scheduled_by_stage,
         "waiting_to_schedule": waiting_to_schedule,
         "funnel_stats": funnel_stats,
+        "funnel_stats_365d": funnel_stats_365d,
         "source_stats": source_stats,
         "total_active": len(active),
         "total_archived_365d": len(archived),
