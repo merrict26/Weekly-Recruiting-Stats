@@ -648,25 +648,33 @@ def build_data_summary(active, archived, postings_map):
     ref_check_id = "d03862a2-e446-4ade-bee6-4b200cf9b399"
     offer_id = "offer"
     
+    # Onsite stage ID (the actual interview, not "Schedule Onsite")
+    onsite_interview_id = "cb7dd941-ed9f-4803-9ed5-158681732b65"
+    
+    # All post-onsite stages (completing onsite = entering any of these)
+    post_onsite_stages = {debrief_id, ref_check_id, offer_id}
+    
     # Track candidates through the funnel (last 90 days)
     funnel_90d = {
-        "completed_intro": set(),      # Made it past intro
-        "completed_technical": set(),  # Made it past technical
-        "completed_onsite": set(),     # Made it to debrief+ (completed onsite)
-        "reached_offer": set(),        # Made it to offer stage
+        "did_intro": {},        # opp_id -> candidate info
+        "passed_intro": set(),  # Made it to technical+
+        "did_technical": {},    # opp_id -> candidate info
+        "passed_technical": set(),  # Made it to onsite+
+        "did_onsite": {},       # opp_id -> candidate info (had an onsite)
+        "passed_onsite": set(), # Made it to offer
+        "reached_offer": set(),
         "offers_extended": 0,
         "offers_accepted": 0,
         "offers_declined": 0,
     }
-    
-    # Archived reason for declined offers
-    DECLINED_REASON_ID = "63dd5c13-f8c7-4343-ab6d-68bd9bff2c58"  # Common "candidate withdrew" or "declined offer"
     
     for opp in active + archived:
         opp_id = opp.get("id", "")
         stage_changes = opp.get("stageChanges") or []
         current_stage = opp.get("stage")
         archived_info = opp.get("archived") or {}
+        name = opp.get("name", "Unknown")
+        role = get_role(opp, postings_map)
         
         # Check if any stage change happened in last 90 days
         recent_activity = False
@@ -679,7 +687,13 @@ def build_data_summary(active, archived, postings_map):
         if not recent_activity:
             continue
         
-        # Track which stages they passed through
+        # Track what stages they went through
+        did_intro = False
+        did_technical = False
+        did_onsite = False
+        reached_debrief_or_later = False
+        reached_offer = False
+        
         for change in stage_changes:
             to_stage_id = change.get("toStageId")
             updated_at = change.get("updatedAt")
@@ -689,25 +703,72 @@ def build_data_summary(active, archived, postings_map):
             if (now_ms - updated_at) > days_90_ms:
                 continue
             
-            # Passed intro = entered technical or later
-            if to_stage_id in completed_stage_ids.get("Technical", []) or \
-               to_stage_id in scheduled_stage_ids.get("Technical", []) or \
-               to_stage_id in waiting_to_schedule_ids.get("Technical", []):
-                funnel_90d["completed_intro"].add(opp_id)
+            # Did intro = entered technical stage (Schedule Technical, Technical, Tech #2)
+            tech_stage_ids = (
+                waiting_to_schedule_ids.get("Technical", []) + 
+                scheduled_stage_ids.get("Technical", [])
+            )
+            if to_stage_id in tech_stage_ids:
+                did_intro = True
+                funnel_90d["passed_intro"].add(opp_id)
             
-            # Passed technical = entered onsite or later  
-            if to_stage_id in completed_stage_ids.get("Onsite", []) or \
-               to_stage_id in scheduled_stage_ids.get("Onsite", []) or \
-               to_stage_id in waiting_to_schedule_ids.get("Onsite", []):
-                funnel_90d["completed_technical"].add(opp_id)
+            # Did technical = entered onsite stage (Schedule Onsite, Onsite)
+            onsite_stage_ids = (
+                waiting_to_schedule_ids.get("Onsite", []) + 
+                scheduled_stage_ids.get("Onsite", [])
+            )
+            if to_stage_id in onsite_stage_ids:
+                did_technical = True
+                funnel_90d["passed_technical"].add(opp_id)
             
-            # Completed onsite = entered debrief, ref check, or offer
-            if to_stage_id in [debrief_id, ref_check_id, offer_id]:
-                funnel_90d["completed_onsite"].add(opp_id)
+            # Did onsite = entered post-onsite stage (Debrief, Ref Check, Offer)
+            if to_stage_id in post_onsite_stages:
+                did_onsite = True
+                reached_debrief_or_later = True
+                funnel_90d["did_onsite"][opp_id] = {"name": name, "role": role}
             
             # Reached offer
             if to_stage_id == offer_id:
+                reached_offer = True
                 funnel_90d["reached_offer"].add(opp_id)
+                funnel_90d["passed_onsite"].add(opp_id)
+    
+    # Track onsite failures: completed onsite (in Debrief/Ref Check) but got rejected
+    onsite_failures = []
+    for opp in archived:
+        opp_id = opp.get("id", "")
+        archived_info = opp.get("archived") or {}
+        archived_at = archived_info.get("archivedAt")
+        reason = archived_info.get("reason")
+        last_stage = opp.get("stage")
+        name = opp.get("name", "Unknown")
+        role = get_role(opp, postings_map)
+        
+        if not archived_at or (now_ms - archived_at) > days_90_ms:
+            continue
+        
+        # Rejected from Debrief or Ref Check = failed onsite
+        if last_stage in [debrief_id, ref_check_id] and reason != HIRED_REASON_ID:
+            archived_date = datetime.fromtimestamp(archived_at / 1000).strftime("%Y-%m-%d")
+            onsite_failures.append({
+                "name": name,
+                "role": role,
+                "stage": "Debrief" if last_stage == debrief_id else "References",
+                "date": archived_date,
+            })
+            # Make sure they're counted in did_onsite
+            funnel_90d["did_onsite"][opp_id] = {"name": name, "role": role}
+        
+        # Also check if rejected from Onsite stage itself (never made it to Debrief)
+        if last_stage == onsite_interview_id and reason != HIRED_REASON_ID:
+            archived_date = datetime.fromtimestamp(archived_at / 1000).strftime("%Y-%m-%d")
+            onsite_failures.append({
+                "name": name,
+                "role": role,
+                "stage": "Onsite",
+                "date": archived_date,
+            })
+            funnel_90d["did_onsite"][opp_id] = {"name": name, "role": role}
     
     # Count offers extended, accepted, declined from archived candidates
     for opp in archived:
@@ -740,23 +801,28 @@ def build_data_summary(active, archived, postings_map):
             funnel_90d["offers_extended"] += 1
     
     # Calculate conversion rates
+    total_did_onsite = len(funnel_90d["did_onsite"])
+    total_passed_onsite = len(funnel_90d["passed_onsite"])
+    
     funnel_stats = {
         "period": "last_90_days",
         "intro_to_technical": {
-            "passed": len(funnel_90d["completed_intro"]),
+            "passed": len(funnel_90d["passed_intro"]),
             "total": interviews_completed["last_90_days"]["Intro"],
-            "rate": round(len(funnel_90d["completed_intro"]) / max(interviews_completed["last_90_days"]["Intro"], 1) * 100, 1),
+            "rate": round(len(funnel_90d["passed_intro"]) / max(interviews_completed["last_90_days"]["Intro"], 1) * 100, 1),
         },
         "technical_to_onsite": {
-            "passed": len(funnel_90d["completed_technical"]),
+            "passed": len(funnel_90d["passed_technical"]),
             "total": interviews_completed["last_90_days"]["Technical"],
-            "rate": round(len(funnel_90d["completed_technical"]) / max(interviews_completed["last_90_days"]["Technical"], 1) * 100, 1),
+            "rate": round(len(funnel_90d["passed_technical"]) / max(interviews_completed["last_90_days"]["Technical"], 1) * 100, 1),
         },
         "onsite_to_offer": {
-            "completed_onsite": len(funnel_90d["completed_onsite"]),
-            "reached_offer": len(funnel_90d["reached_offer"]),
-            "rate": round(len(funnel_90d["reached_offer"]) / max(len(funnel_90d["completed_onsite"]), 1) * 100, 1),
+            "did_onsite": total_did_onsite,
+            "passed": total_passed_onsite,
+            "failed": total_did_onsite - total_passed_onsite,
+            "rate": round(total_passed_onsite / max(total_did_onsite, 1) * 100, 1),
         },
+        "onsite_failures": onsite_failures,  # List of who failed
         "offer_acceptance": {
             "extended": funnel_90d["offers_extended"],
             "accepted": funnel_90d["offers_accepted"],
@@ -767,6 +833,7 @@ def build_data_summary(active, archived, postings_map):
     }
     
     print(f"✓ Funnel: {funnel_stats['intro_to_technical']['rate']}% intro→tech, {funnel_stats['technical_to_onsite']['rate']}% tech→onsite, {funnel_stats['onsite_to_offer']['rate']}% onsite→offer")
+    print(f"  Onsite failures: {len(onsite_failures)}")
 
     return {
         "pipeline": pipeline,
