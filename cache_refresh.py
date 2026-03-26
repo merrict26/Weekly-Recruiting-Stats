@@ -530,16 +530,75 @@ def build_data_summary(active, archived, postings_map):
                     break
     print(f"✓ Fetched interview dates for {len(onsite_completions)} completed onsites")
     
+    # Also look at candidates CURRENTLY in end stages (Debrief, Ref Check, Offer)
+    # who may have completed onsites recently but weren't captured by stage change tracking
+    end_stage_ids = {
+        "359f9594-ada0-4ca2-bec2-8b3f7eb2106a",  # Debrief
+        "d03862a2-e446-4ade-bee6-4b200cf9b399",  # Reference check
+        "offer",  # Offer
+    }
+    tracked_opp_ids = {item.get("opp_id") for item in onsite_completions}
+    
+    print("📥 Checking end-stage candidates for recent onsites...")
+    end_stage_onsites = []
+    for opp in active:
+        stage_id = opp.get("stage")
+        if stage_id not in end_stage_ids:
+            continue
+        opp_id = opp.get("id")
+        if opp_id in tracked_opp_ids:
+            continue  # Already tracked
+        
+        # Fetch interviews to find onsite date
+        interviews = fetch_interviews(opp_id)
+        for interview in sorted(interviews, key=lambda x: x.get("date", 0), reverse=True):
+            interview_date_ms = interview.get("date")
+            if interview_date_ms:
+                interview_date = datetime.fromtimestamp(interview_date_ms / 1000)
+                days_ago = (datetime.now() - interview_date).days
+                if days_ago <= 30:  # Only include recent onsites
+                    end_stage_onsites.append({
+                        "name": opp.get("name", "Unknown"),
+                        "role": get_role(opp, postings_map),
+                        "stage_completed": "Onsite",
+                        "outcome": "passed",
+                        "date": interview_date.strftime("%Y-%m-%d"),
+                        "days_ago": days_ago,
+                    })
+                break
+    
+    print(f"✓ Found {len(end_stage_onsites)} additional onsites from end-stage candidates")
+    
+    # Combine all onsite completions
+    all_onsite_completions = onsite_completions + end_stage_onsites
+    
     completed_by_stage = {"Onsite": [], "Technical": [], "Intro": [], "Final Stages": []}
+    
+    # Add onsites (from both sources), deduplicated by name
+    seen_names = set()
+    for item in all_onsite_completions:
+        if item["name"] in seen_names:
+            continue
+        seen_names.add(item["name"])
+        completed_by_stage["Onsite"].append({
+            "name": item["name"],
+            "role": item["role"],
+            "stage_completed": "Onsite",
+            "outcome": item["outcome"],
+            "date": item.get("interview_date") or item["date"],
+            "days_ago": item["days_ago"],
+        })
+    
+    # Add other stages from recent_interviews
     for item in recent_interviews[:50]:
         stage = item.get("stage_completed")
-        if stage in completed_by_stage:
+        if stage in completed_by_stage and stage != "Onsite":
             completed_by_stage[stage].append({
                 "name": item["name"],
                 "role": item["role"],
                 "stage_completed": stage,
                 "outcome": item["outcome"],
-                "date": item.get("interview_date") or item["date"],  # Use real date if available
+                "date": item.get("interview_date") or item["date"],
                 "days_ago": item["days_ago"],
             })
     
