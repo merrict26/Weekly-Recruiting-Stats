@@ -516,8 +516,12 @@ def build_data_summary(active, archived, postings_map):
     
     # Group recent_interviews by stage for easier display
     # First, fetch real interview dates for Onsite completions (most important)
+    # Skip interns - they don't do onsites
     print("📥 Fetching interview dates for completed onsites...")
-    onsite_completions = [item for item in recent_interviews if item.get("stage_completed") == "Onsite"]
+    onsite_completions = [
+        item for item in recent_interviews 
+        if item.get("stage_completed") == "Onsite" and "Intern" not in item.get("role", "")
+    ]
     for item in onsite_completions[:20]:  # Limit to avoid too many API calls
         opp_id = item.get("opp_id")
         if opp_id:
@@ -545,27 +549,54 @@ def build_data_summary(active, archived, postings_map):
         stage_id = opp.get("stage")
         if stage_id not in end_stage_ids:
             continue
+        
+        # Skip interns - they don't do onsites
+        role = get_role(opp, postings_map)
+        if "Intern" in role:
+            continue
+            
         opp_id = opp.get("id")
         if opp_id in tracked_opp_ids:
             continue  # Already tracked
         
+        # Find when they entered end stage (to find the right interview)
+        stage_changes = opp.get("stageChanges") or []
+        entered_end_stage_at = None
+        for change in stage_changes:
+            if change.get("toStageId") in end_stage_ids:
+                entered_end_stage_at = change.get("updatedAt")
+                break
+        
         # Fetch interviews to find onsite date
         interviews = fetch_interviews(opp_id)
+        
+        # Find interview that happened BEFORE they entered end stage (that's the onsite)
+        best_interview = None
         for interview in sorted(interviews, key=lambda x: x.get("date", 0), reverse=True):
             interview_date_ms = interview.get("date")
             if interview_date_ms:
-                interview_date = datetime.fromtimestamp(interview_date_ms / 1000)
-                days_ago = (datetime.now() - interview_date).days
-                if days_ago <= 30:  # Only include recent onsites
-                    end_stage_onsites.append({
-                        "name": opp.get("name", "Unknown"),
-                        "role": get_role(opp, postings_map),
-                        "stage_completed": "Onsite",
-                        "outcome": "passed",
-                        "date": interview_date.strftime("%Y-%m-%d"),
-                        "days_ago": days_ago,
-                    })
-                break
+                # If we know when they entered end stage, find interview before that
+                if entered_end_stage_at and interview_date_ms < entered_end_stage_at:
+                    best_interview = interview
+                    break
+                elif not entered_end_stage_at:
+                    # Fallback: just use most recent
+                    best_interview = interview
+                    break
+        
+        if best_interview:
+            interview_date_ms = best_interview.get("date")
+            interview_date = datetime.fromtimestamp(interview_date_ms / 1000)
+            days_ago = (datetime.now() - interview_date).days
+            if days_ago <= 30:  # Only include recent onsites
+                end_stage_onsites.append({
+                    "name": opp.get("name", "Unknown"),
+                    "role": role,
+                    "stage_completed": "Onsite",
+                    "outcome": "passed",
+                    "date": interview_date.strftime("%Y-%m-%d"),
+                    "days_ago": days_ago,
+                })
     
     print(f"✓ Found {len(end_stage_onsites)} additional onsites from end-stage candidates")
     
@@ -606,6 +637,137 @@ def build_data_summary(active, archived, postings_map):
     for stage in completed_by_stage:
         completed_by_stage[stage].sort(key=lambda x: x.get("date") or "0000-00-00", reverse=True)
 
+    # ============ FUNNEL CONVERSION STATS ============
+    # Calculate true pass rates by tracking who made it to later stages
+    print("📊 Calculating funnel conversion stats...")
+    
+    days_90_ms = 90 * 24 * 60 * 60 * 1000
+    
+    # Stage IDs for funnel tracking
+    debrief_id = "359f9594-ada0-4ca2-bec2-8b3f7eb2106a"
+    ref_check_id = "d03862a2-e446-4ade-bee6-4b200cf9b399"
+    offer_id = "offer"
+    
+    # Track candidates through the funnel (last 90 days)
+    funnel_90d = {
+        "completed_intro": set(),      # Made it past intro
+        "completed_technical": set(),  # Made it past technical
+        "completed_onsite": set(),     # Made it to debrief+ (completed onsite)
+        "reached_offer": set(),        # Made it to offer stage
+        "offers_extended": 0,
+        "offers_accepted": 0,
+        "offers_declined": 0,
+    }
+    
+    # Archived reason for declined offers
+    DECLINED_REASON_ID = "63dd5c13-f8c7-4343-ab6d-68bd9bff2c58"  # Common "candidate withdrew" or "declined offer"
+    
+    for opp in active + archived:
+        opp_id = opp.get("id", "")
+        stage_changes = opp.get("stageChanges") or []
+        current_stage = opp.get("stage")
+        archived_info = opp.get("archived") or {}
+        
+        # Check if any stage change happened in last 90 days
+        recent_activity = False
+        for change in stage_changes:
+            updated_at = change.get("updatedAt")
+            if updated_at and (now_ms - updated_at) <= days_90_ms:
+                recent_activity = True
+                break
+        
+        if not recent_activity:
+            continue
+        
+        # Track which stages they passed through
+        for change in stage_changes:
+            to_stage_id = change.get("toStageId")
+            updated_at = change.get("updatedAt")
+            
+            if not to_stage_id or not updated_at:
+                continue
+            if (now_ms - updated_at) > days_90_ms:
+                continue
+            
+            # Passed intro = entered technical or later
+            if to_stage_id in completed_stage_ids.get("Technical", []) or \
+               to_stage_id in scheduled_stage_ids.get("Technical", []) or \
+               to_stage_id in waiting_to_schedule_ids.get("Technical", []):
+                funnel_90d["completed_intro"].add(opp_id)
+            
+            # Passed technical = entered onsite or later  
+            if to_stage_id in completed_stage_ids.get("Onsite", []) or \
+               to_stage_id in scheduled_stage_ids.get("Onsite", []) or \
+               to_stage_id in waiting_to_schedule_ids.get("Onsite", []):
+                funnel_90d["completed_technical"].add(opp_id)
+            
+            # Completed onsite = entered debrief, ref check, or offer
+            if to_stage_id in [debrief_id, ref_check_id, offer_id]:
+                funnel_90d["completed_onsite"].add(opp_id)
+            
+            # Reached offer
+            if to_stage_id == offer_id:
+                funnel_90d["reached_offer"].add(opp_id)
+    
+    # Count offers extended, accepted, declined from archived candidates
+    for opp in archived:
+        opp_id = opp.get("id", "")
+        archived_info = opp.get("archived") or {}
+        archived_at = archived_info.get("archivedAt")
+        reason = archived_info.get("reason")
+        
+        if not archived_at or (now_ms - archived_at) > days_90_ms:
+            continue
+        
+        # Check if they were in offer stage
+        stage_changes = opp.get("stageChanges") or []
+        was_in_offer = False
+        for change in stage_changes:
+            if change.get("toStageId") == offer_id:
+                was_in_offer = True
+                break
+        
+        if was_in_offer:
+            funnel_90d["offers_extended"] += 1
+            if reason == HIRED_REASON_ID:
+                funnel_90d["offers_accepted"] += 1
+            else:
+                funnel_90d["offers_declined"] += 1
+    
+    # Also count active candidates currently in offer stage
+    for opp in active:
+        if opp.get("stage") == offer_id:
+            funnel_90d["offers_extended"] += 1
+    
+    # Calculate conversion rates
+    funnel_stats = {
+        "period": "last_90_days",
+        "intro_to_technical": {
+            "passed": len(funnel_90d["completed_intro"]),
+            "total": interviews_completed["last_90_days"]["Intro"],
+            "rate": round(len(funnel_90d["completed_intro"]) / max(interviews_completed["last_90_days"]["Intro"], 1) * 100, 1),
+        },
+        "technical_to_onsite": {
+            "passed": len(funnel_90d["completed_technical"]),
+            "total": interviews_completed["last_90_days"]["Technical"],
+            "rate": round(len(funnel_90d["completed_technical"]) / max(interviews_completed["last_90_days"]["Technical"], 1) * 100, 1),
+        },
+        "onsite_to_offer": {
+            "completed_onsite": len(funnel_90d["completed_onsite"]),
+            "reached_offer": len(funnel_90d["reached_offer"]),
+            "rate": round(len(funnel_90d["reached_offer"]) / max(len(funnel_90d["completed_onsite"]), 1) * 100, 1),
+        },
+        "offer_acceptance": {
+            "extended": funnel_90d["offers_extended"],
+            "accepted": funnel_90d["offers_accepted"],
+            "declined": funnel_90d["offers_declined"],
+            "pending": funnel_90d["offers_extended"] - funnel_90d["offers_accepted"] - funnel_90d["offers_declined"],
+            "acceptance_rate": round(funnel_90d["offers_accepted"] / max(funnel_90d["offers_accepted"] + funnel_90d["offers_declined"], 1) * 100, 1),
+        },
+    }
+    
+    print(f"✓ Funnel: {funnel_stats['intro_to_technical']['rate']}% intro→tech, {funnel_stats['technical_to_onsite']['rate']}% tech→onsite, {funnel_stats['onsite_to_offer']['rate']}% onsite→offer")
+
     return {
         "pipeline": pipeline,
         "active_by_role": active_by_role,
@@ -618,6 +780,7 @@ def build_data_summary(active, archived, postings_map):
         "completed_by_stage": completed_by_stage,
         "scheduled_by_stage": scheduled_by_stage,
         "waiting_to_schedule": waiting_to_schedule,
+        "funnel_stats": funnel_stats,
         "source_stats": source_stats,
         "total_active": len(active),
         "total_archived_365d": len(archived),
