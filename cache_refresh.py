@@ -133,15 +133,32 @@ def build_data_summary(active, archived, postings_map):
         stage = get_stage_group(opp.get("stage"))
         active_by_role[role]["byStage"][stage] = active_by_role[role]["byStage"].get(stage, 0) + 1
 
-    # Active pipeline candidates (HM Review+)
+    # Active pipeline candidates (HM Review+) with specific status
     pipeline_stages = {"Hiring Manager Review", "Intro", "Technical", "Onsite", "Final Stages", "Offer"}
     active_pipeline_candidates = []
     now_ms = datetime.now().timestamp() * 1000
     
+    # Map stage IDs to specific status
+    stage_status_map = {
+        "94d7f5df-ec0f-4061-b54d-bea369ace17b": ("Intro", "waiting"),  # Schedule Intro Call
+        "fb6d2f07-aeab-4f1c-bf35-72f0cffa37f2": ("Intro", "scheduled"),  # Introductory Call
+        "160000bb-2cba-40df-b9f0-f69c77cd6175": ("Technical", "waiting"),  # Schedule Technical
+        "fae3d918-0118-4f17-b206-f7f29dca3bec": ("Technical", "scheduled"),  # Technical Interview
+        "7ce6a4ba-c34e-4582-be77-dac4b1cf2fe3": ("Technical", "waiting"),  # Schedule Tech #2
+        "a57980a4-4fc4-4252-a0f2-e765e96cfee5": ("Technical", "scheduled"),  # Technical #2
+        "af0f3cb5-4bec-4fbe-8360-f30e9d0c7272": ("Onsite", "waiting"),  # Schedule Onsite
+        "cb7dd941-ed9f-4803-9ed5-158681732b65": ("Onsite", "scheduled"),  # Onsite interview
+    }
+    
     for opp in active:
-        stage = get_stage_group(opp.get("stage"))
-        if stage not in pipeline_stages:
+        stage_id = opp.get("stage")
+        stage_group = get_stage_group(stage_id)
+        if stage_group not in pipeline_stages:
             continue
+        
+        # Get specific status
+        status_info = stage_status_map.get(stage_id)
+        status = status_info[1] if status_info else "active"
         
         created_at = opp.get("createdAt")
         days_in_process = None
@@ -151,7 +168,8 @@ def build_data_summary(active, archived, postings_map):
         active_pipeline_candidates.append({
             "name": opp.get("name", "Unknown"),
             "role": get_role(opp, postings_map),
-            "stage": stage,
+            "stage": stage_group,
+            "status": status,  # "waiting", "scheduled", or "active"
             "sources": (opp.get("sources") or [])[:1],
             "created_at": datetime.fromtimestamp(created_at / 1000).strftime("%Y-%m-%d") if created_at else None,
             "days_in_process": days_in_process,
