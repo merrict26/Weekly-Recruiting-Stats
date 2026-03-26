@@ -63,7 +63,7 @@ def fetch_all_opportunities(archived=False):
     pages = 0
 
     while has_next:
-        params = {"limit": 100, "expand": "applications"}
+        params = {"limit": 100, "expand": "applications,stageChanges"}
         if archived:
             params["archived"] = "true"
             # Fetch last 365 days for historical analysis
@@ -237,6 +237,76 @@ def build_data_summary(active, archived, postings_map):
         "total_hires_measured": len(hire_times),
     }
 
+    # Stage activity tracking (interviews in last N days)
+    now_ms = datetime.now().timestamp() * 1000
+    days_30_ms = 30 * 24 * 60 * 60 * 1000
+    days_7_ms = 7 * 24 * 60 * 60 * 1000
+    days_90_ms = 90 * 24 * 60 * 60 * 1000
+
+    # Stage IDs for interview stages
+    interview_stage_ids = {
+        "Intro": ["94d7f5df-ec0f-4061-b54d-bea369ace17b", "fb6d2f07-aeab-4f1c-bf35-72f0cffa37f2"],
+        "Technical": [
+            "160000bb-2cba-40df-b9f0-f69c77cd6175",
+            "fae3d918-0118-4f17-b206-f7f29dca3bec",
+            "7ce6a4ba-c34e-4582-be77-dac4b1cf2fe3",
+            "a57980a4-4fc4-4252-a0f2-e765e96cfee5",
+        ],
+        "Onsite": ["af0f3cb5-4bec-4fbe-8360-f30e9d0c7272", "cb7dd941-ed9f-4803-9ed5-158681732b65"],
+        "Final Stages": ["359f9594-ada0-4ca2-bec2-8b3f7eb2106a", "d03862a2-e446-4ade-bee6-4b200cf9b399"],
+        "Offer": ["offer"],
+    }
+
+    # Build reverse lookup
+    stage_id_to_interview_stage = {}
+    for stage_name, ids in interview_stage_ids.items():
+        for stage_id in ids:
+            stage_id_to_interview_stage[stage_id] = stage_name
+
+    # Count stage entries by time period
+    stage_activity = {
+        "last_7_days": {"Intro": 0, "Technical": 0, "Onsite": 0, "Final Stages": 0, "Offer": 0},
+        "last_30_days": {"Intro": 0, "Technical": 0, "Onsite": 0, "Final Stages": 0, "Offer": 0},
+        "last_90_days": {"Intro": 0, "Technical": 0, "Onsite": 0, "Final Stages": 0, "Offer": 0},
+    }
+
+    # Recent stage changes with candidate details (for queries like "who had onsites recently")
+    recent_interviews = []
+
+    for opp in active + archived:
+        stage_changes = opp.get("stageChanges") or []
+        for change in stage_changes:
+            to_stage_id = change.get("toStageId")
+            updated_at = change.get("updatedAt")
+            
+            if not to_stage_id or not updated_at:
+                continue
+            
+            interview_stage = stage_id_to_interview_stage.get(to_stage_id)
+            if not interview_stage:
+                continue
+
+            age_ms = now_ms - updated_at
+            change_date = datetime.fromtimestamp(updated_at / 1000).strftime("%Y-%m-%d")
+
+            if age_ms <= days_7_ms:
+                stage_activity["last_7_days"][interview_stage] += 1
+            if age_ms <= days_30_ms:
+                stage_activity["last_30_days"][interview_stage] += 1
+                # Track recent interviews for detail queries
+                recent_interviews.append({
+                    "name": opp.get("name", "Unknown"),
+                    "role": get_role(opp, postings_map),
+                    "stage": interview_stage,
+                    "date": change_date,
+                    "days_ago": round(age_ms / (24 * 60 * 60 * 1000)),
+                })
+            if age_ms <= days_90_ms:
+                stage_activity["last_90_days"][interview_stage] += 1
+
+    # Sort recent interviews by date (most recent first)
+    recent_interviews.sort(key=lambda x: x["date"], reverse=True)
+
     return {
         "pipeline": pipeline,
         "active_by_role": active_by_role,
@@ -244,6 +314,8 @@ def build_data_summary(active, archived, postings_map):
         "offer_details": offer_details,
         "hires": hires,
         "time_to_hire_stats": time_to_hire_stats,
+        "stage_activity": stage_activity,
+        "recent_interviews": recent_interviews[:50],  # Limit to 50 most recent
         "source_stats": source_stats,
         "total_active": len(active),
         "total_archived_365d": len(archived),
@@ -320,6 +392,10 @@ def main():
     tth = data.get('time_to_hire_stats', {})
     if tth.get('avg_days'):
         print(f"  Avg time to hire: {tth['avg_days']} days (range: {tth['min_days']}-{tth['max_days']})")
+    
+    # Stage activity
+    sa = data.get('stage_activity', {}).get('last_30_days', {})
+    print(f"  Last 30 days: {sa.get('Intro', 0)} intros, {sa.get('Technical', 0)} technicals, {sa.get('Onsite', 0)} onsites, {sa.get('Offer', 0)} offers")
     print()
     
     print("☁️ Updating Cloudflare KV cache...")
