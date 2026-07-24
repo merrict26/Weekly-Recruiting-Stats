@@ -13,6 +13,20 @@ from collections import defaultdict
 LEVER_API_KEY = os.environ["LEVER_API_KEY"]
 SLACK_WEBHOOK_URL = os.environ["SLACK_WEBHOOK_URL"]
 
+# === DISPLAY CONFIG ===
+# The public digest stays counts-only by default. Candidate names and LinkedIn
+# links belong in the private #tmp-recruiting-<candidate> channels, not a
+# company-wide post — most candidates haven't told their employer they're
+# interviewing. Flip this to True only if you deliberately want names back.
+SHOW_CANDIDATE_NAMES = False
+
+# Pinned reference canvases in #recruiting (linked at the bottom of the digest).
+HOW_HIRING_WORKS_URL = "https://zaimler.slack.com/docs/TSG5HLXK7/F0BKGTENSBD"
+ROLE_LIBRARY_URL = "https://zaimler.slack.com/docs/TSG5HLXK7/F0BKP526WV8"
+
+# Referral link (Lever).
+REFERRAL_URL = "https://hire.lever.co/referrals/new"
+
 # Lever pipeline stages by ID (more reliable than names)
 STAGE_GROUPS = {
     "Hiring Manager Review": ["3b5d887e-0629-4ceb-973a-663952c97b21"],
@@ -62,6 +76,15 @@ LOCATION_SHORT = {
     "Remote": "Remote",
 }
 
+STAGE_EMOJI = {
+    "Hiring Manager Review": "👀",
+    "Intro": "📞",
+    "Technical": "💻",
+    "Onsite": "🏢",
+    "Final Stages": "📋",
+    "Offer": "🎉",
+}
+
 
 def shorten_location(location):
     """Convert full location to short abbreviation."""
@@ -87,7 +110,7 @@ def get_all_opportunities():
     opportunities = []
     has_next = True
     offset = None
-    
+
     while has_next:
         params = {
             "limit": 100,
@@ -96,13 +119,13 @@ def get_all_opportunities():
         }
         if offset:
             params["offset"] = offset
-        
+
         result = lever_request("opportunities", params)
         opportunities.extend(result.get("data", []))
-        
+
         has_next = result.get("hasNext", False)
         offset = result.get("next")
-    
+
     return opportunities
 
 
@@ -111,18 +134,18 @@ def get_open_postings():
     postings = []
     has_next = True
     offset = None
-    
+
     while has_next:
         params = {"state": "published", "limit": 100}
         if offset:
             params["offset"] = offset
-        
+
         result = lever_request("postings", params)
         postings.extend(result.get("data", []))
-        
+
         has_next = result.get("hasNext", False)
         offset = result.get("next")
-    
+
     return postings
 
 
@@ -161,38 +184,31 @@ def count_by_stage_group(stage_counts):
     return grouped
 
 
+def get_tracked_stage_ids():
+    """Flat set of every stage ID that counts as 'in the active pipeline'."""
+    ids = []
+    for stage_list in STAGE_GROUPS.values():
+        ids.extend(stage_list)
+    return set(ids)
+
+
 def get_candidates_added_since(opportunities, since_date):
     """Count candidates added since a given date (only in tracked stages)."""
-    # Get all tracked stage IDs
-    tracked_stage_ids = []
-    for stage_list in STAGE_GROUPS.values():
-        tracked_stage_ids.extend(stage_list)
-    
+    tracked_stage_ids = get_tracked_stage_ids()
+
     count = 0
     for opp in opportunities:
         # Only count if in a tracked stage
         stage = get_stage_id(opp)
         if stage not in tracked_stage_ids:
             continue
-            
+
         created_at = opp.get("createdAt")
         if created_at:
             created = datetime.fromtimestamp(created_at / 1000)
             if created >= since_date:
                 count += 1
     return count
-
-
-def get_interviews_this_week(since_date):
-    """
-    Fetch interview count from Lever.
-    Note: This uses the interviews endpoint which requires iterating through opportunities.
-    For simplicity, we'll estimate based on stage movements.
-    """
-    # Lever's API doesn't have a simple "interviews completed" endpoint
-    # You could integrate with your calendar or use stage change timestamps
-    # For now, return None and we'll skip this metric or add it manually
-    return None
 
 
 def get_onsites_this_week(opportunities, since_date):
@@ -205,10 +221,46 @@ def get_onsites_this_week(opportunities, since_date):
     return count
 
 
+def get_opp_posting_id(opp):
+    """Best-effort extraction of the posting ID for an opportunity."""
+    posting_id = opp.get("posting")
+    if not posting_id:
+        applications = opp.get("applications", [])
+        if applications:
+            first_app = applications[0]
+            if isinstance(first_app, dict):
+                posting_data = first_app.get("posting")
+                if isinstance(posting_data, dict):
+                    posting_id = posting_data.get("id")
+                elif isinstance(posting_data, str):
+                    posting_id = posting_data
+                if not posting_id:
+                    posting_id = first_app.get("postingId")
+    return posting_id
+
+
+def count_pipeline_per_role(opportunities):
+    """Candidates per posting, counting ONLY those in an active pipeline stage.
+
+    The old per-role number counted every non-archived opportunity (including
+    hundreds of sourced leads/prospects never in the funnel), which is why it
+    swung wildly week to week. Restricting to tracked pipeline stages makes it
+    a stable, honest 'how many are actually interviewing for this role' count.
+    """
+    tracked = get_tracked_stage_ids()
+    counts = defaultdict(int)
+    for opp in opportunities:
+        if get_stage_id(opp) in tracked:
+            pid = get_opp_posting_id(opp)
+            if pid:
+                counts[pid] += 1
+    return counts
+
+
 def get_candidate_details(opportunity, postings_map):
     """Extract candidate name, role, location, and LinkedIn from an opportunity."""
     name = opportunity.get("name", "Unknown")
-    
+
     # Get LinkedIn URL from links
     linkedin_url = None
     links = opportunity.get("links", [])
@@ -216,40 +268,17 @@ def get_candidate_details(opportunity, postings_map):
         if isinstance(link, str) and "linkedin.com" in link:
             linkedin_url = link
             break
-    
-    # Get role and location from posting - try multiple possible locations
+
+    # Get role and location from posting
     role = "Unknown Role"
     location = ""
-    posting_id = None
-    
-    # Try direct posting field
-    if opportunity.get("posting"):
-        posting_id = opportunity.get("posting")
-    
-    # Try applications array (expanded format)
-    if not posting_id:
-        applications = opportunity.get("applications", [])
-        if applications:
-            first_app = applications[0]
-            if isinstance(first_app, dict):
-                # Could be nested posting object or just posting ID
-                posting_data = first_app.get("posting")
-                if isinstance(posting_data, dict):
-                    posting_id = posting_data.get("id")
-                elif isinstance(posting_data, str):
-                    posting_id = posting_data
-                # Also try postingId field
-                if not posting_id:
-                    posting_id = first_app.get("postingId")
-            elif isinstance(first_app, str):
-                # Application is just an ID, not expanded
-                pass
-    
+    posting_id = get_opp_posting_id(opportunity)
+
     if posting_id and posting_id in postings_map:
         posting_info = postings_map[posting_id]
         role = posting_info.get("title", "Unknown Role")
         location = posting_info.get("location", "")
-    
+
     return {
         "name": name,
         "role": role,
@@ -268,200 +297,154 @@ def get_candidates_in_stages(opportunities, stage_ids, postings_map):
     return candidates
 
 
+def build_tldr(data):
+    """One-line human summary for the top of the digest."""
+    parts = [f"{data['total_active']} in pipeline"]
+    offers = data["by_group"].get("Offer", 0)
+    if offers:
+        parts.append(f"{offers} offer{'s' if offers != 1 else ''} out")
+    if data["new_candidates"]:
+        parts.append(f"{data['new_candidates']} new this week")
+    return " · ".join(parts)
+
+
+def render_candidate_lines(candidates):
+    """Render a bullet list of candidates (only used when names are shown)."""
+    text = ""
+    for c in candidates:
+        location = f" ({c['location']})" if c.get("location") else ""
+        if c.get("linkedin"):
+            text += f"• <{c['linkedin']}|{c['name']}> — {c['role']}{location}\n"
+        else:
+            text += f"• {c['name']} — {c['role']}{location}\n"
+    return text
+
+
 def format_slack_message(data):
     """Format the digest as a Slack message with blocks."""
     # Get Monday of the current week
     today = datetime.now()
     monday = today - timedelta(days=today.weekday())
     week_of = monday.strftime("%B %d, %Y")
-    
+
     blocks = [
         {
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": f"Week of {week_of}",
+                "text": f"📋 Recruiting Digest — Week of {week_of}",
                 "emoji": True
             }
         },
         {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"*This Week's Activity*\n• New candidates added: *{data['new_candidates']}*\n• Candidates in onsite stages: *{data['onsites']}*"
-            }
-        },
-        {
-            "type": "divider"
-        },
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": "*Pipeline Snapshot*"
-            }
+            "type": "context",
+            "elements": [
+                {"type": "mrkdwn", "text": f"*TL;DR:* {build_tldr(data)}"}
+            ]
         },
     ]
-    
-    # Pipeline by stage group
-    pipeline_text = ""
-    for group_name in STAGE_GROUPS.keys():
-        count = data["by_group"].get(group_name, 0)
-        emoji = {
-            "Hiring Manager Review": "👀",
-            "Intro": "📞",
-            "Technical": "💻",
-            "Onsite": "🏢",
-            "Final Stages": "📋",
-            "Offer": "🎉"
-        }.get(group_name, "•")
-        pipeline_text += f"{emoji} {group_name}: *{count}*\n"
-    
+
+    # What changed this week
+    changed_text = f"*🔄 What changed this week*\n• New candidates added: *{data['new_candidates']}*"
+    offers = data["by_group"].get("Offer", 0)
+    if offers:
+        changed_text += f"\n• Offers out: *{offers}*"
     blocks.append({
         "type": "section",
-        "text": {
-            "type": "mrkdwn", 
-            "text": pipeline_text
-        }
+        "text": {"type": "mrkdwn", "text": changed_text}
     })
-    
-    # Offers out (highlight if any)
-    if data["by_group"].get("Offer", 0) > 0:
-        blocks.append({
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"🎯 *{data['by_group']['Offer']} offer(s) currently out!*"
-            }
-        })
-    
-    # Show candidates in Onsite stages
-    if data.get("onsite_candidates"):
-        blocks.append({
-            "type": "divider"
-        })
-        blocks.append({
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": "*🏢 Candidates in Onsite*"
-            }
-        })
-        onsite_text = ""
-        for c in data["onsite_candidates"]:
-            location = f" ({c['location']})" if c.get("location") else ""
-            if c["linkedin"]:
-                onsite_text += f"• <{c['linkedin']}|{c['name']}> — {c['role']}{location}\n"
-            else:
-                onsite_text += f"• {c['name']} — {c['role']}{location}\n"
-        blocks.append({
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": onsite_text
-            }
-        })
-    
-    # Show candidates in Final Stages (Debrief + Reference check)
-    if data.get("final_candidates"):
-        blocks.append({
-            "type": "divider"
-        })
-        blocks.append({
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": "*📋 Candidates in Final Stages*"
-            }
-        })
-        final_text = ""
-        for c in data["final_candidates"]:
-            location = f" ({c['location']})" if c.get("location") else ""
-            if c["linkedin"]:
-                final_text += f"• <{c['linkedin']}|{c['name']}> — {c['role']}{location}\n"
-            else:
-                final_text += f"• {c['name']} — {c['role']}{location}\n"
-        blocks.append({
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": final_text
-            }
-        })
-    
-    # Show candidates with Offers
-    if data.get("offer_candidates"):
-        blocks.append({
-            "type": "divider"
-        })
-        blocks.append({
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": "*🎉 Candidates with Offers*"
-            }
-        })
-        offer_text = ""
-        for c in data["offer_candidates"]:
-            location = f" ({c['location']})" if c.get("location") else ""
-            if c["linkedin"]:
-                offer_text += f"• <{c['linkedin']}|{c['name']}> — {c['role']}{location}\n"
-            else:
-                offer_text += f"• {c['name']} — {c['role']}{location}\n"
-        blocks.append({
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": offer_text
-            }
-        })
-    
+
+    blocks.append({"type": "divider"})
+
+    # Pipeline snapshot by stage group
+    pipeline_text = "*📊 Pipeline snapshot*\n"
+    for group_name in STAGE_GROUPS.keys():
+        count = data["by_group"].get(group_name, 0)
+        emoji = STAGE_EMOJI.get(group_name, "•")
+        pipeline_text += f"{emoji} {group_name}: *{count}*\n"
     blocks.append({
-        "type": "divider"
+        "type": "section",
+        "text": {"type": "mrkdwn", "text": pipeline_text}
     })
-    
-    # Open positions section
+
+    if offers > 0:
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"🎯 *{offers} offer(s) currently out!*"
+            }
+        })
+
+    # Candidate name lists are OFF by default (privacy). Counts above already
+    # convey movement; names live in the private per-candidate channels.
+    if SHOW_CANDIDATE_NAMES:
+        for label, key in [
+            ("🏢 Candidates in Onsite", "onsite_candidates"),
+            ("📋 Candidates in Final Stages", "final_candidates"),
+            ("🎉 Candidates with Offers", "offer_candidates"),
+        ]:
+            if data.get(key):
+                blocks.append({"type": "divider"})
+                blocks.append({
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": f"*{label}*"}
+                })
+                blocks.append({
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": render_candidate_lines(data[key])}
+                })
+
+    blocks.append({"type": "divider"})
+
+    # Open positions — counts-only, per-role ACTIVE-PIPELINE count
     blocks.append({
         "type": "section",
         "text": {
             "type": "mrkdwn",
-            "text": f"*Open Positions ({data['total_open_positions']})*"
+            "text": f"*🧩 Open roles ({data['total_open_positions']})*  ·  _count = candidates in active pipeline_"
         }
     })
-    
-    # List open roles grouped by department/team - table style
+
     if data["open_positions_grouped"]:
         for group_name, roles in data["open_positions_grouped"].items():
-            # Sort roles by candidate count (most to least)
-            sorted_roles = sorted(roles, key=lambda r: data["candidates_per_role"].get(r["id"], 0), reverse=True)
-            
+            # Sort roles by active-pipeline count (most to least)
+            sorted_roles = sorted(
+                roles,
+                key=lambda r: data["pipeline_per_role"].get(r["id"], 0),
+                reverse=True
+            )
+
             group_text = f"*{group_name}*\n```\n"
             for role in sorted_roles:
                 short_loc = shorten_location(role.get("location", ""))
                 loc_str = f"({short_loc})" if short_loc else ""
-                candidate_count = data["candidates_per_role"].get(role["id"], 0)
-                
-                # Format: Title (LOC)    count
+                count = data["pipeline_per_role"].get(role["id"], 0)
+
                 title_with_loc = f"{role['title']} {loc_str}".strip()
-                count_str = str(candidate_count) if candidate_count > 0 else "-"
-                
-                # Pad to align counts (adjust 40 if titles are longer)
+                count_str = str(count) if count > 0 else "–"
                 group_text += f"{title_with_loc:<45} {count_str:>3}\n"
-            
+
             group_text += "```"
-            
             blocks.append({
                 "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": group_text
-                }
+                "text": {"type": "mrkdwn", "text": group_text}
             })
-    
+
+    blocks.append({"type": "divider"})
+
+    # Pointers to the pinned reference canvases (priority, JDs, process, FAQ)
     blocks.append({
-        "type": "divider"
+        "type": "section",
+        "text": {
+            "type": "mrkdwn",
+            "text": (
+                f"📌 <{HOW_HIRING_WORKS_URL}|How Hiring Works>"
+                f"  ·  📚 <{ROLE_LIBRARY_URL}|Role Library> — priority, JDs & interview panels"
+            )
+        }
     })
-    
+
     # Refer a candidate button
     blocks.append({
         "type": "actions",
@@ -473,22 +456,22 @@ def format_slack_message(data):
                     "text": "🎯 Refer a Candidate",
                     "emoji": True
                 },
-                "url": "https://hire.lever.co/referrals/new",
+                "url": REFERRAL_URL,
                 "style": "primary"
             }
         ]
     })
-    
+
     blocks.append({
         "type": "context",
         "elements": [
             {
                 "type": "mrkdwn",
-                "text": f"Total active candidates: {data['total_active']}"
+                "text": f"Total active candidates: {data['total_active']}  ·  Referral bonus: $10,000 / ₹5 lakh"
             }
         ]
     })
-    
+
     return {"blocks": blocks}
 
 
@@ -501,23 +484,23 @@ def post_to_slack(message):
 
 def main():
     print("Fetching data from Lever...")
-    
+
     # Get all active opportunities
     opportunities = get_all_opportunities()
     print(f"Found {len(opportunities)} active candidates")
-    
+
     # Get open postings
     postings = get_open_postings()
     print(f"Found {len(postings)} open positions")
-    
+
     # Calculate metrics
     one_week_ago = datetime.now() - timedelta(days=7)
-    
+
     stage_counts = count_by_stage(opportunities)
     grouped_counts = count_by_stage_group(stage_counts)
     new_candidates = get_candidates_added_since(opportunities, one_week_ago)
     onsites = get_onsites_this_week(opportunities, one_week_ago)
-    
+
     # Build postings map for role lookup (includes title and location)
     postings_map = {}
     for posting in postings:
@@ -525,61 +508,42 @@ def main():
             "title": posting.get("text", "Unknown Role"),
             "location": posting.get("categories", {}).get("location", ""),
         }
-    
-    # Get detailed candidate info for onsite, final stages, and offer
+
+    # Detailed candidate lists (only rendered if SHOW_CANDIDATE_NAMES is True)
     onsite_candidates = get_candidates_in_stages(opportunities, ONSITE_STAGE_IDS, postings_map)
     final_candidates = get_candidates_in_stages(opportunities, FINAL_STAGE_IDS, postings_map)
     offer_candidates = get_candidates_in_stages(opportunities, [OFFER_STAGE_ID], postings_map)
-    
-    # Count candidates per role (by posting ID)
-    # Note: Each opportunity may have multiple applications to different postings
-    candidates_per_role = defaultdict(int)
-    for opp in opportunities:
-        # Try to get posting from different possible locations in the API response
-        posting_id = None
-        
-        # Check if there's a direct posting field (some Lever API versions)
-        if opp.get("posting"):
-            posting_id = opp.get("posting")
-        
-        # Check applications - could be list of IDs or list of objects
-        applications = opp.get("applications", [])
-        if applications:
-            first_app = applications[0]
-            if isinstance(first_app, dict):
-                posting_id = first_app.get("posting") or first_app.get("postingId")
-            # If it's a string, it's an application ID, not a posting ID
-        
-        if posting_id:
-            candidates_per_role[posting_id] += 1
-    
+
+    # Per-role counts, restricted to candidates actually in the active pipeline
+    pipeline_per_role = count_pipeline_per_role(opportunities)
+
     # Format postings for display, grouped by department
     open_positions_by_dept = defaultdict(list)
     for posting in postings:
         location = posting.get("categories", {}).get("location", "")
         department = posting.get("categories", {}).get("department", "")
         team = posting.get("categories", {}).get("team", "")
-        
+
         # Get the job posting URL
         posting_url = posting.get("hostedUrl") or posting.get("urls", {}).get("show", "")
-        
+
         # Use team if available, otherwise department, otherwise "Other"
         group = team or department or "Other"
-        
+
         open_positions_by_dept[group].append({
             "id": posting.get("id"),
             "title": posting.get("text", "Unknown Role"),
             "location": location,
             "url": posting_url,
         })
-    
+
     # Sort positions within each group
     for group in open_positions_by_dept:
         open_positions_by_dept[group].sort(key=lambda x: x["title"])
-    
+
     # Convert to regular dict and sort groups alphabetically
     open_positions_grouped = dict(sorted(open_positions_by_dept.items()))
-    
+
     data = {
         "new_candidates": new_candidates,
         "onsites": onsites,
@@ -587,12 +551,12 @@ def main():
         "total_active": sum(grouped_counts.values()),
         "open_positions_grouped": open_positions_grouped,
         "total_open_positions": len(postings),
-        "candidates_per_role": candidates_per_role,
+        "pipeline_per_role": pipeline_per_role,
         "onsite_candidates": onsite_candidates,
         "final_candidates": final_candidates,
         "offer_candidates": offer_candidates,
     }
-    
+
     # Format and send
     message = format_slack_message(data)
     post_to_slack(message)
