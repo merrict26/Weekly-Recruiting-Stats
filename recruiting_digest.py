@@ -507,6 +507,25 @@ def write_preview(message):
     print("\n[DRY_RUN] wrote PREVIEW.md — nothing posted to Slack")
 
 
+def write_roles(open_positions_grouped):
+    """Dump the authoritative live posting list (title, team, location, URL, id)."""
+    lines = [
+        "<!-- Live Lever postings from DRY_RUN — source of truth for the Role Library -->",
+        "",
+        "| Role | Team | Location | Hosted URL | Posting ID |",
+        "|---|---|---|---|---|",
+    ]
+    for group, roles in open_positions_grouped.items():
+        for r in roles:
+            lines.append(
+                f"| {r['title']} | {group} | {r.get('location','')} | "
+                f"{r.get('url','') or '(none)'} | {r['id']} |"
+            )
+    with open("ROLES.md", "w") as f:
+        f.write("\n".join(lines) + "\n")
+    print("[DRY_RUN] wrote ROLES.md")
+
+
 def main():
     print("Fetching data from Lever...")
 
@@ -586,6 +605,7 @@ def main():
     message = format_slack_message(data)
     if DRY_RUN:
         write_preview(message)
+        write_roles(open_positions_grouped)
     else:
         post_to_slack(message)
 

@@ -33,6 +33,6 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add PREVIEW.md
-          git commit -m "Digest preview (live Lever, not posted) [skip ci]" || echo "No changes"
+          git add PREVIEW.md ROLES.md
+          git commit -m "Digest preview + roles dump (live Lever, not posted) [skip ci]" || echo "No changes"
           git push
