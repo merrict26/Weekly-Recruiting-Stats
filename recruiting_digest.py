@@ -508,17 +508,23 @@ def write_preview(message):
 
 
 def write_roles(open_positions_grouped):
-    """Dump the authoritative live posting list (title, team, location, URL, id)."""
+    """Dump the authoritative live posting list (title, team, location, search-start date, URL, id)."""
+    def fmt_date(ms):
+        if not ms:
+            return "(unknown)"
+        return datetime.fromtimestamp(ms / 1000).strftime("%Y-%m-%d")
+
     lines = [
         "<!-- Live Lever postings from DRY_RUN — source of truth for the Role Library -->",
         "",
-        "| Role | Team | Location | Hosted URL | Posting ID |",
-        "|---|---|---|---|---|",
+        "| Role | Team | Location | Search started | Hosted URL | Posting ID |",
+        "|---|---|---|---|---|---|",
     ]
     for group, roles in open_positions_grouped.items():
         for r in roles:
             lines.append(
                 f"| {r['title']} | {group} | {r.get('location','')} | "
+                f"{fmt_date(r.get('created'))} | "
                 f"{r.get('url','') or '(none)'} | {r['id']} |"
             )
     with open("ROLES.md", "w") as f:
@@ -579,6 +585,7 @@ def main():
             "title": posting.get("text", "Unknown Role"),
             "location": location,
             "url": posting_url,
+            "created": posting.get("createdAt"),  # epoch ms — when the search opened
         })
 
     # Sort positions within each group
