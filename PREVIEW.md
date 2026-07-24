@@ -24,24 +24,24 @@ _*TL;DR:* 3 in pipeline · 3 new this week_
 
 *P0 — target close within ~1 month*
 ```
-Cloud Infrastructure Engineer (SF)          –  close Mar 14
-Backend Engineer (BLR)                      –  close Dec 04
-BI Integration Engineer (BLR)               3  close Aug 14
+BI Integration Engineer (BLR)        3   close Aug 24
+Backend Engineer (BLR)               –   close Aug 24
+Cloud Infrastructure Engineer (SF)   –   close Aug 24
 ```
 
-*P1 — target close within the quarter*
+*P1 — target close: end of quarter*
 ```
-Cloud Infrastructure Engineer (BLR)         –  close Nov 26
-Senior Security Engineer (BLR)              –  close Apr 20
-Software Engineer in Test (BLR)             –  close May 06
-Head of Product (SF)                        –  close May 06
-Director of Marketing (SF)                  –  close Jun 10
+Cloud Infrastructure Engineer (BLR)   –   close Oct 31
+Director of Marketing (SF)            –   close Oct 31
+Head of Product (SF)                  –   close Oct 31
+Senior Security Engineer (BLR)        –   close Oct 31
+Software Engineer in Test (BLR)       –   close Oct 31
 ```
 
 *P2 — opportunistic (no target)*
 ```
-Machine Learning Engineer, ML Platform (SF)  –
-Staff Applied Machine Learning Engineer (SF)  –
+Machine Learning Engineer, ML Platform (SF)    –
+Staff Applied Machine Learning Engineer (SF)   –
 ```
 
 ---
