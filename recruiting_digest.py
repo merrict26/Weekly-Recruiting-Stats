@@ -2,56 +2,50 @@
 """
 Weekly Recruiting Digest: Lever → Slack
 Pulls pipeline stats from Lever API and posts a formatted digest to Slack.
+
+Scalable model — nothing role-specific is hardcoded:
+  • Priority tier comes from a Lever TAG on each posting: "P0", "P1", or "P2".
+    Untagged roles show up under "Unprioritized" so they get noticed.
+  • Target-close dates are computed by calendar rule (see TARGET RULES below),
+    so they roll forward on their own — no edits when a month/quarter turns.
+  • A hard deadline can override the rule with a tag "due:YYYY-MM-DD".
 """
 
 import os
+import calendar
 import requests
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
 from collections import defaultdict
 
 # === CONFIG ===
 LEVER_API_KEY = os.environ["LEVER_API_KEY"]
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
-# When DRY_RUN is set, render the digest to PREVIEW.md instead of posting to Slack.
+# When DRY_RUN is set, render to PREVIEW.md / ROLES.md instead of posting to Slack.
 DRY_RUN = bool(os.environ.get("DRY_RUN"))
 
 # === DISPLAY CONFIG ===
-# The public digest stays counts-only by default. Candidate names and LinkedIn
-# links belong in the private #tmp-recruiting-<candidate> channels, not a
-# company-wide post — most candidates haven't told their employer they're
-# interviewing. Flip this to True only if you deliberately want names back.
+# Counts-only by default — candidate names/LinkedIn stay in the private
+# #tmp-recruiting-<candidate> channels. Flip True only to list names.
 SHOW_CANDIDATE_NAMES = False
 
-# Pinned reference canvases in #recruiting (linked at the bottom of the digest).
 HOW_HIRING_WORKS_URL = "https://zaimler.slack.com/docs/TSG5HLXK7/F0BKGTENSBD"
 ROLE_LIBRARY_URL = "https://zaimler.slack.com/docs/TSG5HLXK7/F0BKP526WV8"
-
-# Referral link (Lever).
 REFERRAL_URL = "https://hire.lever.co/referrals/new"
 
-# === PRIORITY CONFIG ===
-# Priority tier per role, keyed by Lever posting ID. Lever doesn't store tiers,
-# so this is the single source of truth — update it when priorities change.
-ROLE_PRIORITY = {
-    "04ddccc0-34e1-4f30-9591-ff46dd428b89": "P0",  # BI Integration Engineer (BLR)
-    "31008cbb-9ba9-422b-89d9-5589a345f708": "P0",  # Backend Engineer (BLR)
-    "0cac2143-7856-4913-9d6a-445066207c9c": "P0",  # Cloud Infrastructure Engineer (SF)
-    "10da0517-7829-4d29-b7ce-826aada95c9a": "P1",  # Cloud Infrastructure Engineer (BLR)
-    "32f6f84b-96a7-4ac3-9d1a-8403c737312b": "P1",  # Senior Security Engineer (BLR)
-    "119feb40-9fc7-474b-9ea4-089e39f5e861": "P1",  # Software Engineer in Test (BLR)
-    "5dd55f48-9fdd-49c1-9d64-950ba5a43a21": "P1",  # Director of Marketing (SF)
-    "6eac543e-74a9-4f00-a108-2f341df5bd07": "P1",  # Head of Product (SF)
-    "c4932cc1-5fba-4a80-92e4-15c4d0f30f96": "P2",  # ML Engineer, ML Platform (SF)
-    "e2e564b4-acf2-454d-a479-4b54772bdfbc": "P2",  # Staff Applied ML Engineer (SF)
-}
+# === TARGET RULES ===
+# Fiscal year starts in February (Feb→Feb), so fiscal quarters end
+# Apr 30 / Jul 31 / Oct 31 / Jan 31.
+FISCAL_START_MONTH = 2
+# P0 = this many months from today. P1 = end of fiscal quarter (with runway).
+P0_MONTHS = 1
+# If the current quarter ends within this many days, P1 rolls to next quarter
+# (so a freshly-prioritized role isn't handed an unrealistic deadline).
+P1_RUNWAY_DAYS = 30
 
-# Target-close window per tier, in months after the search opens.
-# None = no target date (opportunistic).
-PRIORITY_WINDOW_MONTHS = {"P0": 1, "P1": 3, "P2": None}
 TIER_ORDER = ["P0", "P1", "P2"]
 TIER_HEADER = {
     "P0": "*P0 — target close within ~1 month*",
-    "P1": "*P1 — target close within the quarter*",
+    "P1": "*P1 — target close: end of quarter*",
     "P2": "*P2 — opportunistic (no target)*",
 }
 
@@ -79,22 +73,16 @@ STAGE_GROUPS = {
     "Offer": ["offer"],
 }
 
-# Onsite stage IDs (for "candidates in onsite stages" metric)
 ONSITE_STAGE_IDS = [
     "af0f3cb5-4bec-4fbe-8360-f30e9d0c7272",
     "cb7dd941-ed9f-4803-9ed5-158681732b65",
 ]
-
-# Offer stage ID
 OFFER_STAGE_ID = "offer"
-
-# Final stages IDs (Debrief + Reference check)
 FINAL_STAGE_IDS = [
     "359f9594-ada0-4ca2-bec2-8b3f7eb2106a",
     "d03862a2-e446-4ade-bee6-4b200cf9b399",
 ]
 
-# Location abbreviations
 LOCATION_SHORT = {
     "San Mateo, CA": "SF",
     "San Francisco, CA": "SF",
@@ -114,117 +102,131 @@ STAGE_EMOJI = {
 }
 
 
+# ----------------------------------------------------------------------------
+# Tag parsing + date rules
+# ----------------------------------------------------------------------------
+
+def parse_tier(tags):
+    """Return 'P0'/'P1'/'P2' from a posting's Lever tags, or None if untagged."""
+    for t in tags or []:
+        u = str(t).strip().upper()
+        if u in ("P0", "P1", "P2"):
+            return u
+    return None
+
+
+def parse_due(tags):
+    """Return a hard deadline date from a 'due:YYYY-MM-DD' tag, or None."""
+    for t in tags or []:
+        s = str(t).strip().lower()
+        if s.startswith("due:"):
+            try:
+                return datetime.strptime(s[4:].strip(), "%Y-%m-%d").date()
+            except ValueError:
+                pass
+    return None
+
+
+def add_months(d, months):
+    """Return d shifted forward by a whole number of months (clamped day)."""
+    m = d.month - 1 + months
+    y = d.year + m // 12
+    m = m % 12 + 1
+    day = min(d.day, calendar.monthrange(y, m)[1])
+    return date(y, m, day)
+
+
+def fiscal_quarter_end(d):
+    """Last day of the fiscal quarter containing d (fiscal year starts Feb)."""
+    m = d.month
+    if 2 <= m <= 4:
+        return date(d.year, 4, 30)
+    if 5 <= m <= 7:
+        return date(d.year, 7, 31)
+    if 8 <= m <= 10:
+        return date(d.year, 10, 31)
+    # Nov, Dec -> next Jan 31; Jan -> this Jan 31
+    return date(d.year + 1 if m in (11, 12) else d.year, 1, 31)
+
+
+def next_fiscal_quarter_end(d):
+    return fiscal_quarter_end(fiscal_quarter_end(d) + timedelta(days=1))
+
+
+def compute_target(tier, due, today):
+    """Target-close date for a role. Hard 'due' wins; else calendar rule by tier."""
+    if due:
+        return due
+    if tier == "P0":
+        return add_months(today, P0_MONTHS)
+    if tier == "P1":
+        qend = fiscal_quarter_end(today)
+        if (qend - today).days < P1_RUNWAY_DAYS:
+            return next_fiscal_quarter_end(today)
+        return qend
+    return None  # P2 or unprioritized
+
+
+# ----------------------------------------------------------------------------
+# Lever API
+# ----------------------------------------------------------------------------
+
 def shorten_location(location):
-    """Convert full location to short abbreviation."""
     if not location:
         return ""
     return LOCATION_SHORT.get(location, location)
 
 
-def add_months(dt, months):
-    """Return dt shifted forward by a whole number of months (clamped day)."""
-    import calendar
-    m = dt.month - 1 + months
-    y = dt.year + m // 12
-    m = m % 12 + 1
-    d = min(dt.day, calendar.monthrange(y, m)[1])
-    return dt.replace(year=y, month=m, day=d)
-
-
-def target_close(created_ms, tier):
-    """Target fill date = search-open date + the tier's window. None if no target."""
-    months = PRIORITY_WINDOW_MONTHS.get(tier)
-    if not created_ms or not months:
-        return None
-    start = datetime.fromtimestamp(created_ms / 1000)
-    return add_months(start, months)
-
-
 def lever_request(endpoint, params=None):
-    """Make authenticated request to Lever API."""
     url = f"https://api.lever.co/v1/{endpoint}"
-    response = requests.get(
-        url,
-        auth=(LEVER_API_KEY, ""),
-        params=params or {}
-    )
+    response = requests.get(url, auth=(LEVER_API_KEY, ""), params=params or {})
     response.raise_for_status()
     return response.json()
 
 
 def get_all_opportunities():
-    """Fetch all active (non-archived) opportunities from Lever."""
     opportunities = []
     has_next = True
     offset = None
-
     while has_next:
-        params = {
-            "limit": 100,
-            "archived": "false",  # Only get active candidates
-            "expand": "applications",  # Include application data with posting info
-        }
+        params = {"limit": 100, "archived": "false", "expand": "applications"}
         if offset:
             params["offset"] = offset
-
         result = lever_request("opportunities", params)
         opportunities.extend(result.get("data", []))
-
         has_next = result.get("hasNext", False)
         offset = result.get("next")
-
     return opportunities
 
 
 def get_open_postings():
-    """Fetch all published (open) job postings from Lever."""
     postings = []
     has_next = True
     offset = None
-
     while has_next:
         params = {"state": "published", "limit": 100}
         if offset:
             params["offset"] = offset
-
         result = lever_request("postings", params)
         postings.extend(result.get("data", []))
-
         has_next = result.get("hasNext", False)
         offset = result.get("next")
-
     return postings
 
 
 def get_stage_id(opportunity):
-    """Extract current stage ID from opportunity."""
     stage = opportunity.get("stage")
-    if stage:
-        return stage
-    return "Unknown"
-
-
-def get_posting_title(opportunity):
-    """Get the job posting title for an opportunity."""
-    applications = opportunity.get("applications", [])
-    if applications:
-        posting = applications[0].get("posting")
-        if posting:
-            return posting.get("text", "Unknown Role")
-    return "Unknown Role"
+    return stage if stage else "Unknown"
 
 
 def count_by_stage(opportunities):
-    """Count candidates in each stage."""
     counts = defaultdict(int)
     for opp in opportunities:
-        stage = get_stage_id(opp)
-        counts[stage] += 1
+        counts[get_stage_id(opp)] += 1
     return counts
 
 
 def count_by_stage_group(stage_counts):
-    """Aggregate stage counts into groups."""
     grouped = {}
     for group_name, stages in STAGE_GROUPS.items():
         grouped[group_name] = sum(stage_counts.get(s, 0) for s in stages)
@@ -232,7 +234,6 @@ def count_by_stage_group(stage_counts):
 
 
 def get_tracked_stage_ids():
-    """Flat set of every stage ID that counts as 'in the active pipeline'."""
     ids = []
     for stage_list in STAGE_GROUPS.values():
         ids.extend(stage_list)
@@ -240,36 +241,22 @@ def get_tracked_stage_ids():
 
 
 def get_candidates_added_since(opportunities, since_date):
-    """Count candidates added since a given date (only in tracked stages)."""
-    tracked_stage_ids = get_tracked_stage_ids()
-
+    tracked = get_tracked_stage_ids()
     count = 0
     for opp in opportunities:
-        # Only count if in a tracked stage
-        stage = get_stage_id(opp)
-        if stage not in tracked_stage_ids:
+        if get_stage_id(opp) not in tracked:
             continue
-
         created_at = opp.get("createdAt")
-        if created_at:
-            created = datetime.fromtimestamp(created_at / 1000)
-            if created >= since_date:
-                count += 1
-    return count
-
-
-def get_onsites_this_week(opportunities, since_date):
-    """Count candidates currently in onsite stages."""
-    count = 0
-    for opp in opportunities:
-        stage = get_stage_id(opp)
-        if stage in ONSITE_STAGE_IDS:
+        if created_at and datetime.fromtimestamp(created_at / 1000) >= since_date:
             count += 1
     return count
 
 
+def get_onsites_this_week(opportunities, since_date):
+    return sum(1 for opp in opportunities if get_stage_id(opp) in ONSITE_STAGE_IDS)
+
+
 def get_opp_posting_id(opp):
-    """Best-effort extraction of the posting ID for an opportunity."""
     posting_id = opp.get("posting")
     if not posting_id:
         applications = opp.get("applications", [])
@@ -287,13 +274,7 @@ def get_opp_posting_id(opp):
 
 
 def count_pipeline_per_role(opportunities):
-    """Candidates per posting, counting ONLY those in an active pipeline stage.
-
-    The old per-role number counted every non-archived opportunity (including
-    hundreds of sourced leads/prospects never in the funnel), which is why it
-    swung wildly week to week. Restricting to tracked pipeline stages makes it
-    a stable, honest 'how many are actually interviewing for this role' count.
-    """
+    """Candidates per posting, ONLY those in a tracked pipeline stage (stable count)."""
     tracked = get_tracked_stage_ids()
     counts = defaultdict(int)
     for opp in opportunities:
@@ -305,47 +286,30 @@ def count_pipeline_per_role(opportunities):
 
 
 def get_candidate_details(opportunity, postings_map):
-    """Extract candidate name, role, location, and LinkedIn from an opportunity."""
     name = opportunity.get("name", "Unknown")
-
-    # Get LinkedIn URL from links
     linkedin_url = None
-    links = opportunity.get("links", [])
-    for link in links:
+    for link in opportunity.get("links", []):
         if isinstance(link, str) and "linkedin.com" in link:
             linkedin_url = link
             break
-
-    # Get role and location from posting
-    role = "Unknown Role"
-    location = ""
+    role, location = "Unknown Role", ""
     posting_id = get_opp_posting_id(opportunity)
-
     if posting_id and posting_id in postings_map:
-        posting_info = postings_map[posting_id]
-        role = posting_info.get("title", "Unknown Role")
-        location = posting_info.get("location", "")
-
-    return {
-        "name": name,
-        "role": role,
-        "location": location,
-        "linkedin": linkedin_url,
-    }
+        role = postings_map[posting_id].get("title", "Unknown Role")
+        location = postings_map[posting_id].get("location", "")
+    return {"name": name, "role": role, "location": location, "linkedin": linkedin_url}
 
 
 def get_candidates_in_stages(opportunities, stage_ids, postings_map):
-    """Get list of candidates currently in specified stages."""
-    candidates = []
-    for opp in opportunities:
-        stage = get_stage_id(opp)
-        if stage in stage_ids:
-            candidates.append(get_candidate_details(opp, postings_map))
-    return candidates
+    return [get_candidate_details(o, postings_map)
+            for o in opportunities if get_stage_id(o) in stage_ids]
 
+
+# ----------------------------------------------------------------------------
+# Rendering
+# ----------------------------------------------------------------------------
 
 def build_tldr(data):
-    """One-line human summary for the top of the digest."""
     parts = [f"{data['total_active']} in pipeline"]
     offers = data["by_group"].get("Offer", 0)
     if offers:
@@ -356,7 +320,6 @@ def build_tldr(data):
 
 
 def render_candidate_lines(candidates):
-    """Render a bullet list of candidates (only used when names are shown)."""
     text = ""
     for c in candidates:
         location = f" ({c['location']})" if c.get("location") else ""
@@ -367,188 +330,113 @@ def render_candidate_lines(candidates):
     return text
 
 
+def render_bucket(header, recs, today, show_close):
+    """recs: list of dicts {label, count, close}. Aligned monospace block."""
+    recs.sort(key=lambda r: (r["close"] or date(9999, 1, 1), r["label"]))
+    width = max((len(r["label"]) for r in recs), default=0)
+    body = header + "\n```\n"
+    for r in recs:
+        count_str = str(r["count"]) if r["count"] > 0 else "–"
+        line = f"{r['label']:<{width}}   {count_str:>1}"
+        if show_close and r["close"]:
+            line += "   close " + r["close"].strftime("%b %d")
+            if r["close"] < today:
+                line += "  ⚠ overdue"
+        body += line + "\n"
+    body += "```"
+    return body
+
+
 def format_slack_message(data):
-    """Format the digest as a Slack message with blocks."""
-    # Get Monday of the current week
     today = datetime.now()
     monday = today - timedelta(days=today.weekday())
     week_of = monday.strftime("%B %d, %Y")
+    today_d = today.date()
 
     blocks = [
-        {
-            "type": "header",
-            "text": {
-                "type": "plain_text",
-                "text": f"📋 Recruiting Digest — Week of {week_of}",
-                "emoji": True
-            }
-        },
-        {
-            "type": "context",
-            "elements": [
-                {"type": "mrkdwn", "text": f"*TL;DR:* {build_tldr(data)}"}
-            ]
-        },
+        {"type": "header",
+         "text": {"type": "plain_text", "text": f"📋 Recruiting Digest — Week of {week_of}", "emoji": True}},
+        {"type": "context",
+         "elements": [{"type": "mrkdwn", "text": f"*TL;DR:* {build_tldr(data)}"}]},
     ]
 
-    # What changed this week
     changed_text = f"*🔄 What changed this week*\n• New candidates added: *{data['new_candidates']}*"
     offers = data["by_group"].get("Offer", 0)
     if offers:
         changed_text += f"\n• Offers out: *{offers}*"
-    blocks.append({
-        "type": "section",
-        "text": {"type": "mrkdwn", "text": changed_text}
-    })
+    blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": changed_text}})
 
     blocks.append({"type": "divider"})
 
-    # Pipeline snapshot by stage group
     pipeline_text = "*📊 Pipeline snapshot*\n"
     for group_name in STAGE_GROUPS.keys():
-        count = data["by_group"].get(group_name, 0)
-        emoji = STAGE_EMOJI.get(group_name, "•")
-        pipeline_text += f"{emoji} {group_name}: *{count}*\n"
-    blocks.append({
-        "type": "section",
-        "text": {"type": "mrkdwn", "text": pipeline_text}
-    })
+        pipeline_text += f"{STAGE_EMOJI.get(group_name, '•')} {group_name}: *{data['by_group'].get(group_name, 0)}*\n"
+    blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": pipeline_text}})
 
     if offers > 0:
-        blocks.append({
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"🎯 *{offers} offer(s) currently out!*"
-            }
-        })
+        blocks.append({"type": "section",
+                       "text": {"type": "mrkdwn", "text": f"🎯 *{offers} offer(s) currently out!*"}})
 
-    # Candidate name lists are OFF by default (privacy). Counts above already
-    # convey movement; names live in the private per-candidate channels.
     if SHOW_CANDIDATE_NAMES:
-        for label, key in [
-            ("🏢 Candidates in Onsite", "onsite_candidates"),
-            ("📋 Candidates in Final Stages", "final_candidates"),
-            ("🎉 Candidates with Offers", "offer_candidates"),
-        ]:
+        for label, key in [("🏢 Candidates in Onsite", "onsite_candidates"),
+                           ("📋 Candidates in Final Stages", "final_candidates"),
+                           ("🎉 Candidates with Offers", "offer_candidates")]:
             if data.get(key):
                 blocks.append({"type": "divider"})
-                blocks.append({
-                    "type": "section",
-                    "text": {"type": "mrkdwn", "text": f"*{label}*"}
-                })
-                blocks.append({
-                    "type": "section",
-                    "text": {"type": "mrkdwn", "text": render_candidate_lines(data[key])}
-                })
+                blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": f"*{label}*"}})
+                blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": render_candidate_lines(data[key])}})
 
     blocks.append({"type": "divider"})
+    blocks.append({"type": "section",
+                   "text": {"type": "mrkdwn",
+                            "text": f"*🧩 Open roles ({data['total_open_positions']})*  ·  _count = in active pipeline · close = target fill date_"}})
 
-    # Open roles — grouped by priority tier, with a target-close date per role
-    blocks.append({
-        "type": "section",
-        "text": {
-            "type": "mrkdwn",
-            "text": f"*🧩 Open roles ({data['total_open_positions']})*  ·  _count = in active pipeline · close = target fill date_"
-        }
-    })
-
-    # Bucket every open role by tier (unmapped roles fall into 'other' so
-    # nothing is silently dropped when a new req appears in Lever).
+    # Bucket by tier (from Lever tags); untagged -> Unprioritized.
     buckets = {t: [] for t in TIER_ORDER}
     other = []
     for group_name, roles in data["open_positions_grouped"].items():
         for role in roles:
-            tier = ROLE_PRIORITY.get(role["id"])
+            tier = role.get("tier")
+            loc = shorten_location(role.get("location", ""))
             rec = {
-                "title": role["title"],
-                "loc": shorten_location(role.get("location", "")),
+                "label": f"{role['title']} ({loc})" if loc else role["title"],
                 "count": data["pipeline_per_role"].get(role["id"], 0),
-                "close": target_close(role.get("created"), tier),
+                "close": compute_target(tier, role.get("due"), today_d),
             }
             (buckets[tier] if tier in buckets else other).append(rec)
 
-    def render_bucket(header, recs, show_close):
-        recs.sort(key=lambda r: (r["close"] or datetime.max, r["title"]))
-        body = header + "\n```\n"
-        for r in recs:
-            loc_str = f"({r['loc']})" if r["loc"] else ""
-            title_with_loc = f"{r['title']} {loc_str}".strip()
-            count_str = str(r["count"]) if r["count"] > 0 else "–"
-            close_str = ""
-            if show_close and r["close"]:
-                close_str = "  close " + r["close"].strftime("%b %d")
-            body += f"{title_with_loc:<42}{count_str:>3}{close_str}\n"
-        body += "```"
-        return body
-
     for t in TIER_ORDER:
         if buckets[t]:
-            blocks.append({
-                "type": "section",
-                "text": {"type": "mrkdwn",
-                         "text": render_bucket(TIER_HEADER[t], buckets[t], show_close=(t != "P2"))}
-            })
+            blocks.append({"type": "section",
+                           "text": {"type": "mrkdwn",
+                                    "text": render_bucket(TIER_HEADER[t], buckets[t], today_d, show_close=(t != "P2"))}})
     if other:
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn",
-                     "text": render_bucket("*Unprioritized — add to ROLE_PRIORITY*", other, show_close=False)}
-        })
+        blocks.append({"type": "section",
+                       "text": {"type": "mrkdwn",
+                                "text": render_bucket("*Unprioritized — add a P0/P1/P2 tag in Lever*", other, today_d, show_close=False)}})
 
     blocks.append({"type": "divider"})
-
-    # Pointers to the pinned reference canvases (priority, JDs, process, FAQ)
-    blocks.append({
-        "type": "section",
-        "text": {
-            "type": "mrkdwn",
-            "text": (
-                f"📌 <{HOW_HIRING_WORKS_URL}|How Hiring Works>"
-                f"  ·  📚 <{ROLE_LIBRARY_URL}|Role Library> — priority, JDs & interview panels"
-            )
-        }
-    })
-
-    # Refer a candidate button
-    blocks.append({
-        "type": "actions",
-        "elements": [
-            {
-                "type": "button",
-                "text": {
-                    "type": "plain_text",
-                    "text": "🎯 Refer a Candidate",
-                    "emoji": True
-                },
-                "url": REFERRAL_URL,
-                "style": "primary"
-            }
-        ]
-    })
-
-    blocks.append({
-        "type": "context",
-        "elements": [
-            {
-                "type": "mrkdwn",
-                "text": f"Total active candidates: {data['total_active']}  ·  Referral bonus: $10,000 / ₹5 lakh"
-            }
-        ]
-    })
-
+    blocks.append({"type": "section",
+                   "text": {"type": "mrkdwn",
+                            "text": (f"📌 <{HOW_HIRING_WORKS_URL}|How Hiring Works>"
+                                     f"  ·  📚 <{ROLE_LIBRARY_URL}|Role Library> — priority, JDs & interview panels")}})
+    blocks.append({"type": "actions",
+                   "elements": [{"type": "button",
+                                 "text": {"type": "plain_text", "text": "🎯 Refer a Candidate", "emoji": True},
+                                 "url": REFERRAL_URL, "style": "primary"}]})
+    blocks.append({"type": "context",
+                   "elements": [{"type": "mrkdwn",
+                                 "text": f"Total active candidates: {data['total_active']}  ·  Referral bonus: $10,000 / ₹5 lakh"}]})
     return {"blocks": blocks}
 
 
 def post_to_slack(message):
-    """Post formatted message to Slack webhook."""
     response = requests.post(SLACK_WEBHOOK_URL, json=message)
     response.raise_for_status()
     print("✅ Posted to Slack successfully")
 
 
 def write_preview(message):
-    """Render the digest to plain text and write PREVIEW.md — does NOT post to Slack."""
     lines = []
     for b in message["blocks"]:
         t = b["type"]
@@ -570,12 +458,9 @@ def write_preview(message):
     print("\n[DRY_RUN] wrote PREVIEW.md — nothing posted to Slack")
 
 
-def write_roles(open_positions_grouped):
-    """Dump the authoritative live posting list (title, team, location, search-start date, URL, id)."""
-    def fmt_date(ms):
-        if not ms:
-            return "(unknown)"
-        return datetime.fromtimestamp(ms / 1000).strftime("%Y-%m-%d")
+def write_roles(open_positions_grouped, today_d):
+    def fmt(d):
+        return d.strftime("%Y-%m-%d") if d else "—"
 
     lines = [
         "<!-- Live Lever postings from DRY_RUN — source of truth for the Role Library -->",
@@ -585,13 +470,15 @@ def write_roles(open_positions_grouped):
     ]
     for group, roles in open_positions_grouped.items():
         for r in roles:
-            tier = ROLE_PRIORITY.get(r["id"], "?")
-            close = target_close(r.get("created"), tier)
-            close_str = close.strftime("%Y-%m-%d") if close else "—"
+            tier = r.get("tier") or "—"
+            close = compute_target(r.get("tier"), r.get("due"), today_d)
+            close_str = fmt(close)
+            if close and close < today_d:
+                close_str += " (overdue)"
+            started = date.fromtimestamp(r["created"] / 1000).strftime("%Y-%m-%d") if r.get("created") else "(unknown)"
             lines.append(
                 f"| {r['title']} | {group} | {r.get('location','')} | {tier} | "
-                f"{fmt_date(r.get('created'))} | {close_str} | "
-                f"{r.get('url','') or '(none)'} | {r['id']} |"
+                f"{started} | {close_str} | {r.get('url','') or '(none)'} | {r['id']} |"
             )
     with open("ROLES.md", "w") as f:
         f.write("\n".join(lines) + "\n")
@@ -600,24 +487,19 @@ def write_roles(open_positions_grouped):
 
 def main():
     print("Fetching data from Lever...")
-
-    # Get all active opportunities
     opportunities = get_all_opportunities()
     print(f"Found {len(opportunities)} active candidates")
-
-    # Get open postings
     postings = get_open_postings()
     print(f"Found {len(postings)} open positions")
 
-    # Calculate metrics
     one_week_ago = datetime.now() - timedelta(days=7)
+    today_d = datetime.now().date()
 
     stage_counts = count_by_stage(opportunities)
     grouped_counts = count_by_stage_group(stage_counts)
     new_candidates = get_candidates_added_since(opportunities, one_week_ago)
     onsites = get_onsites_this_week(opportunities, one_week_ago)
 
-    # Build postings map for role lookup (includes title and location)
     postings_map = {}
     for posting in postings:
         postings_map[posting.get("id")] = {
@@ -625,40 +507,33 @@ def main():
             "location": posting.get("categories", {}).get("location", ""),
         }
 
-    # Detailed candidate lists (only rendered if SHOW_CANDIDATE_NAMES is True)
     onsite_candidates = get_candidates_in_stages(opportunities, ONSITE_STAGE_IDS, postings_map)
     final_candidates = get_candidates_in_stages(opportunities, FINAL_STAGE_IDS, postings_map)
     offer_candidates = get_candidates_in_stages(opportunities, [OFFER_STAGE_ID], postings_map)
 
-    # Per-role counts, restricted to candidates actually in the active pipeline
     pipeline_per_role = count_pipeline_per_role(opportunities)
 
-    # Format postings for display, grouped by department
     open_positions_by_dept = defaultdict(list)
     for posting in postings:
         location = posting.get("categories", {}).get("location", "")
         department = posting.get("categories", {}).get("department", "")
         team = posting.get("categories", {}).get("team", "")
-
-        # Get the job posting URL
         posting_url = posting.get("hostedUrl") or posting.get("urls", {}).get("show", "")
-
-        # Use team if available, otherwise department, otherwise "Other"
         group = team or department or "Other"
-
+        tags = posting.get("tags", []) or []
         open_positions_by_dept[group].append({
             "id": posting.get("id"),
             "title": posting.get("text", "Unknown Role"),
             "location": location,
             "url": posting_url,
-            "created": posting.get("createdAt"),  # epoch ms — when the search opened
+            "created": posting.get("createdAt"),   # epoch ms — when the search opened
+            "tags": tags,
+            "tier": parse_tier(tags),              # P0/P1/P2 from a Lever tag
+            "due": parse_due(tags),                # optional hard deadline
         })
 
-    # Sort positions within each group
     for group in open_positions_by_dept:
         open_positions_by_dept[group].sort(key=lambda x: x["title"])
-
-    # Convert to regular dict and sort groups alphabetically
     open_positions_grouped = dict(sorted(open_positions_by_dept.items()))
 
     data = {
@@ -674,11 +549,10 @@ def main():
         "offer_candidates": offer_candidates,
     }
 
-    # Format and send (or render a preview file when DRY_RUN is set)
     message = format_slack_message(data)
     if DRY_RUN:
         write_preview(message)
-        write_roles(open_positions_grouped)
+        write_roles(open_positions_grouped, today_d)
     else:
         post_to_slack(message)
 
