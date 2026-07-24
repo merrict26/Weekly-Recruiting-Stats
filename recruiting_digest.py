@@ -29,6 +29,32 @@ ROLE_LIBRARY_URL = "https://zaimler.slack.com/docs/TSG5HLXK7/F0BKP526WV8"
 # Referral link (Lever).
 REFERRAL_URL = "https://hire.lever.co/referrals/new"
 
+# === PRIORITY CONFIG ===
+# Priority tier per role, keyed by Lever posting ID. Lever doesn't store tiers,
+# so this is the single source of truth — update it when priorities change.
+ROLE_PRIORITY = {
+    "04ddccc0-34e1-4f30-9591-ff46dd428b89": "P0",  # BI Integration Engineer (BLR)
+    "31008cbb-9ba9-422b-89d9-5589a345f708": "P0",  # Backend Engineer (BLR)
+    "0cac2143-7856-4913-9d6a-445066207c9c": "P0",  # Cloud Infrastructure Engineer (SF)
+    "10da0517-7829-4d29-b7ce-826aada95c9a": "P1",  # Cloud Infrastructure Engineer (BLR)
+    "32f6f84b-96a7-4ac3-9d1a-8403c737312b": "P1",  # Senior Security Engineer (BLR)
+    "119feb40-9fc7-474b-9ea4-089e39f5e861": "P1",  # Software Engineer in Test (BLR)
+    "5dd55f48-9fdd-49c1-9d64-950ba5a43a21": "P1",  # Director of Marketing (SF)
+    "6eac543e-74a9-4f00-a108-2f341df5bd07": "P1",  # Head of Product (SF)
+    "c4932cc1-5fba-4a80-92e4-15c4d0f30f96": "P2",  # ML Engineer, ML Platform (SF)
+    "e2e564b4-acf2-454d-a479-4b54772bdfbc": "P2",  # Staff Applied ML Engineer (SF)
+}
+
+# Target-close window per tier, in months after the search opens.
+# None = no target date (opportunistic).
+PRIORITY_WINDOW_MONTHS = {"P0": 1, "P1": 3, "P2": None}
+TIER_ORDER = ["P0", "P1", "P2"]
+TIER_HEADER = {
+    "P0": "*P0 — target close within ~1 month*",
+    "P1": "*P1 — target close within the quarter*",
+    "P2": "*P2 — opportunistic (no target)*",
+}
+
 # Lever pipeline stages by ID (more reliable than names)
 STAGE_GROUPS = {
     "Hiring Manager Review": ["3b5d887e-0629-4ceb-973a-663952c97b21"],
@@ -93,6 +119,25 @@ def shorten_location(location):
     if not location:
         return ""
     return LOCATION_SHORT.get(location, location)
+
+
+def add_months(dt, months):
+    """Return dt shifted forward by a whole number of months (clamped day)."""
+    import calendar
+    m = dt.month - 1 + months
+    y = dt.year + m // 12
+    m = m % 12 + 1
+    d = min(dt.day, calendar.monthrange(y, m)[1])
+    return dt.replace(year=y, month=m, day=d)
+
+
+def target_close(created_ms, tier):
+    """Target fill date = search-open date + the tier's window. None if no target."""
+    months = PRIORITY_WINDOW_MONTHS.get(tier)
+    if not created_ms or not months:
+        return None
+    start = datetime.fromtimestamp(created_ms / 1000)
+    return add_months(start, months)
 
 
 def lever_request(endpoint, params=None):
@@ -399,39 +444,57 @@ def format_slack_message(data):
 
     blocks.append({"type": "divider"})
 
-    # Open positions — counts-only, per-role ACTIVE-PIPELINE count
+    # Open roles — grouped by priority tier, with a target-close date per role
     blocks.append({
         "type": "section",
         "text": {
             "type": "mrkdwn",
-            "text": f"*🧩 Open roles ({data['total_open_positions']})*  ·  _count = candidates in active pipeline_"
+            "text": f"*🧩 Open roles ({data['total_open_positions']})*  ·  _count = in active pipeline · close = target fill date_"
         }
     })
 
-    if data["open_positions_grouped"]:
-        for group_name, roles in data["open_positions_grouped"].items():
-            # Sort roles by active-pipeline count (most to least)
-            sorted_roles = sorted(
-                roles,
-                key=lambda r: data["pipeline_per_role"].get(r["id"], 0),
-                reverse=True
-            )
+    # Bucket every open role by tier (unmapped roles fall into 'other' so
+    # nothing is silently dropped when a new req appears in Lever).
+    buckets = {t: [] for t in TIER_ORDER}
+    other = []
+    for group_name, roles in data["open_positions_grouped"].items():
+        for role in roles:
+            tier = ROLE_PRIORITY.get(role["id"])
+            rec = {
+                "title": role["title"],
+                "loc": shorten_location(role.get("location", "")),
+                "count": data["pipeline_per_role"].get(role["id"], 0),
+                "close": target_close(role.get("created"), tier),
+            }
+            (buckets[tier] if tier in buckets else other).append(rec)
 
-            group_text = f"*{group_name}*\n```\n"
-            for role in sorted_roles:
-                short_loc = shorten_location(role.get("location", ""))
-                loc_str = f"({short_loc})" if short_loc else ""
-                count = data["pipeline_per_role"].get(role["id"], 0)
+    def render_bucket(header, recs, show_close):
+        recs.sort(key=lambda r: (r["close"] or datetime.max, r["title"]))
+        body = header + "\n```\n"
+        for r in recs:
+            loc_str = f"({r['loc']})" if r["loc"] else ""
+            title_with_loc = f"{r['title']} {loc_str}".strip()
+            count_str = str(r["count"]) if r["count"] > 0 else "–"
+            close_str = ""
+            if show_close and r["close"]:
+                close_str = "  close " + r["close"].strftime("%b %d")
+            body += f"{title_with_loc:<42}{count_str:>3}{close_str}\n"
+        body += "```"
+        return body
 
-                title_with_loc = f"{role['title']} {loc_str}".strip()
-                count_str = str(count) if count > 0 else "–"
-                group_text += f"{title_with_loc:<45} {count_str:>3}\n"
-
-            group_text += "```"
+    for t in TIER_ORDER:
+        if buckets[t]:
             blocks.append({
                 "type": "section",
-                "text": {"type": "mrkdwn", "text": group_text}
+                "text": {"type": "mrkdwn",
+                         "text": render_bucket(TIER_HEADER[t], buckets[t], show_close=(t != "P2"))}
             })
+    if other:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn",
+                     "text": render_bucket("*Unprioritized — add to ROLE_PRIORITY*", other, show_close=False)}
+        })
 
     blocks.append({"type": "divider"})
 
@@ -517,14 +580,17 @@ def write_roles(open_positions_grouped):
     lines = [
         "<!-- Live Lever postings from DRY_RUN — source of truth for the Role Library -->",
         "",
-        "| Role | Team | Location | Search started | Hosted URL | Posting ID |",
-        "|---|---|---|---|---|---|",
+        "| Role | Team | Location | Priority | Search started | Target close | Hosted URL | Posting ID |",
+        "|---|---|---|---|---|---|---|---|",
     ]
     for group, roles in open_positions_grouped.items():
         for r in roles:
+            tier = ROLE_PRIORITY.get(r["id"], "?")
+            close = target_close(r.get("created"), tier)
+            close_str = close.strftime("%Y-%m-%d") if close else "—"
             lines.append(
-                f"| {r['title']} | {group} | {r.get('location','')} | "
-                f"{fmt_date(r.get('created'))} | "
+                f"| {r['title']} | {group} | {r.get('location','')} | {tier} | "
+                f"{fmt_date(r.get('created'))} | {close_str} | "
                 f"{r.get('url','') or '(none)'} | {r['id']} |"
             )
     with open("ROLES.md", "w") as f:
