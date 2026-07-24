@@ -28,8 +28,8 @@ DRY_RUN = bool(os.environ.get("DRY_RUN"))
 # #tmp-recruiting-<candidate> channels. Flip True only to list names.
 SHOW_CANDIDATE_NAMES = False
 
-HOW_HIRING_WORKS_URL = "https://zaimler.slack.com/docs/TSG5HLXK7/F0BKGTENSBD"
-ROLE_LIBRARY_URL = "https://zaimler.slack.com/docs/TSG5HLXK7/F0BKP526WV8"
+HOW_HIRING_WORKS_URL = "https://zaimler.atlassian.net/wiki/spaces/ZCH1/pages/1063288834/How+We+Hire"
+ROLE_LIBRARY_URL = "https://zaimler.atlassian.net/wiki/spaces/ZCH1/pages/1063354369/Open+Roles"
 REFERRAL_URL = "https://hire.lever.co/referrals/new"
 
 # === TARGET RULES ===
@@ -418,8 +418,8 @@ def format_slack_message(data):
     blocks.append({"type": "divider"})
     blocks.append({"type": "section",
                    "text": {"type": "mrkdwn",
-                            "text": (f"📌 <{HOW_HIRING_WORKS_URL}|How Hiring Works>"
-                                     f"  ·  📚 <{ROLE_LIBRARY_URL}|Role Library> — priority, JDs & interview panels")}})
+                            "text": (f"📌 <{HOW_HIRING_WORKS_URL}|How We Hire>"
+                                     f"  ·  📚 <{ROLE_LIBRARY_URL}|Open Roles> — priority, JDs & interview guides")}})
     blocks.append({"type": "actions",
                    "elements": [{"type": "button",
                                  "text": {"type": "plain_text", "text": "🎯 Refer a Candidate", "emoji": True},
