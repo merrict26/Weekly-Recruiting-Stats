@@ -46,7 +46,7 @@ Staff Applied Machine Learning Engineer (SF)   –
 
 ---
 
-📌 <https://zaimler.slack.com/docs/TSG5HLXK7/F0BKGTENSBD|How Hiring Works>  ·  📚 <https://zaimler.slack.com/docs/TSG5HLXK7/F0BKP526WV8|Role Library> — priority, JDs & interview panels
+📌 <https://zaimler.atlassian.net/wiki/spaces/ZCH1/pages/1063288834/How+We+Hire|How We Hire>  ·  📚 <https://zaimler.atlassian.net/wiki/spaces/ZCH1/pages/1063354369/Open+Roles|Open Roles> — priority, JDs & interview guides
 
 **[ 🎯 Refer a Candidate ]**
 
