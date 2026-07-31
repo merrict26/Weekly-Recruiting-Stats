@@ -56,14 +56,21 @@ P0_MONTHS = 1
 # get a nonsense retroactive deadline. An entry here wins over every other rule,
 # including a due: tag.
 #
-# Keys may be either a Lever posting ID or an exact posting title. Posting IDs
-# are safer — a title key silently stops applying if anyone renames the role in
-# Lever. Swap these for the IDs in the last column of ROLES.md when convenient.
+# Keys may be any of:
+#   "<posting id>"                 — safest, survives renames. Get IDs from ROLES.md.
+#   ("<title>", "<short loc>")     — disambiguates two postings sharing a title.
+#   "<title>"                      — brittle: silently stops applying on rename,
+#                                    and applies to EVERY posting with that title.
+# Swap these for posting IDs after the first dry run.
 # Delete an entry once the role closes; a key matching nothing warns each run.
 P0_DATE_OVERRIDES = {
-    "BI Integration Engineer": date(2026, 8, 14),
-    "Backend Engineer": date(2026, 8, 24),
-    "Cloud Infrastructure Engineer": date(2026, 8, 24),
+    # BI Integration Engineer (BLR) — search opened 2026-07-14
+    "04ddccc0-34e1-4f30-9591-ff46dd428b89": date(2026, 8, 14),
+    # Backend Engineer (BLR) — search opened 2025-11-04
+    "31008cbb-9ba9-422b-89d9-5589a345f708": date(2026, 8, 24),
+    # Cloud Infrastructure Engineer (San Mateo) — search opened 2025-02-14.
+    # NOT the Bengaluru posting of the same title, which is P1.
+    "0cac2143-7856-4913-9d6a-445066207c9c": date(2026, 8, 24),
 }
 # If the current quarter ends within this many days, P1 rolls to next quarter
 # (so a freshly-prioritized role isn't handed an unrealistic deadline).
@@ -187,15 +194,22 @@ def opened_date(role):
     return date.fromtimestamp(created / 1000)
 
 
-def find_override(posting_id=None, title=None):
-    """Pinned close date for a role, by posting ID or exact title. None if unpinned."""
-    for key in (posting_id, title):
+def find_override(posting_id=None, title=None, location=""):
+    """Pinned close date for a role. Most specific key wins.
+
+    Order: posting ID > (title, short location) > bare title.
+    """
+    keys = [posting_id]
+    if title:
+        keys.append((title, shorten_location(location)))
+        keys.append(title)
+    for key in keys:
         if key and key in P0_DATE_OVERRIDES:
             return P0_DATE_OVERRIDES[key]
     return None
 
 
-def compute_target(tier, due, today, opened=None, posting_id=None, title=None):
+def compute_target(tier, due, today, opened=None, posting_id=None, title=None, location=""):
     """Target-close date for a role.
 
     Precedence: pinned override > due: tag > calendar rule by tier.
@@ -203,7 +217,7 @@ def compute_target(tier, due, today, opened=None, posting_id=None, title=None):
     posting has no createdAt, it falls back to `today` and the date rolls —
     same as the old behaviour, but that case is now logged by main().
     """
-    pinned = find_override(posting_id, title)
+    pinned = find_override(posting_id, title, location)
     if pinned:
         return pinned
     if due:
@@ -454,8 +468,8 @@ def format_slack_message(data):
                 "label": f"{role['title']} ({loc})" if loc else role["title"],
                 "count": data["pipeline_per_role"].get(role["id"], 0),
                 "close": compute_target(tier, role.get("due"), today_d,
-                                        opened=opened_date(role),
-                                        posting_id=role.get("id"), title=role.get("title")),
+                                        opened=opened_date(role), posting_id=role.get("id"),
+                                        title=role.get("title"), location=role.get("location", "")),
             }
             (buckets[tier] if tier in buckets else other).append(rec)
 
@@ -558,11 +572,12 @@ def write_roles(open_positions_grouped, today_d):
             tier = r.get("tier") or "—"
             opened = opened_date(r)
             close = compute_target(r.get("tier"), r.get("due"), today_d,
-                                   opened=opened, posting_id=r.get("id"), title=r.get("title"))
+                                   opened=opened, posting_id=r.get("id"),
+                                   title=r.get("title"), location=r.get("location", ""))
             close_str = fmt(close)
             if close and close < today_d:
                 close_str += " (overdue)"
-            if find_override(r.get("id"), r.get("title")):
+            if find_override(r.get("id"), r.get("title"), r.get("location", "")):
                 close_str += " [pinned]"
             started = opened.strftime("%Y-%m-%d") if opened else "(unknown)"
             lines.append(
@@ -627,17 +642,32 @@ def main():
     open_positions_grouped = dict(sorted(open_positions_by_dept.items()))
 
     # Housekeeping warnings — surfaced in the run log, never in the Slack post.
-    live_keys = {p.get("id") for p in postings} | {p.get("text") for p in postings}
-    for stale in sorted(set(P0_DATE_OVERRIDES) - live_keys):
-        print(f"⚠ P0_DATE_OVERRIDES key '{stale}' matches no open posting — "
-              f"role closed, or the title was changed in Lever. Its pinned date "
-              f"is being ignored. Fix or remove it in recruiting_digest.py.")
+    live_keys = set()
+    for p in postings:
+        loc = shorten_location(p.get("categories", {}).get("location", ""))
+        live_keys.update({p.get("id"), p.get("text"), (p.get("text"), loc)})
+    # key=str: the dict mixes plain strings and (title, loc) tuples, which are
+    # not orderable against each other.
+    for stale in sorted((k for k in P0_DATE_OVERRIDES if k not in live_keys), key=str):
+        print(f"⚠ P0_DATE_OVERRIDES key {stale!r} matches no open posting — "
+              f"role closed, or the title/location changed in Lever. Its pinned "
+              f"date is being ignored. Fix or remove it in recruiting_digest.py.")
     for key in P0_DATE_OVERRIDES:
+        if not isinstance(key, str):
+            continue  # (title, loc) tuples are already unambiguous
         dupes = [p for p in postings if p.get("text") == key]
         if len(dupes) > 1:
             print(f"⚠ P0_DATE_OVERRIDES key '{key}' matches {len(dupes)} open "
-                  f"postings; all of them get the pinned date. Use posting IDs "
-                  f"instead: {', '.join(p.get('id','?') for p in dupes)}")
+                  f"postings; all of them get the pinned date. Use a posting ID "
+                  f"or (title, location): {', '.join(p.get('id','?') for p in dupes)}")
+    # A pin bypasses the tier rule entirely, so a pinned role that is no longer
+    # P0 still gets its P0-style date. Flag it rather than silently honouring it.
+    for roles in open_positions_grouped.values():
+        for r in roles:
+            if r["tier"] != "P0" and find_override(r.get("id"), r.get("title"), r.get("location", "")):
+                print(f"⚠ '{r['title']}' is pinned in P0_DATE_OVERRIDES but is "
+                      f"tagged {r['tier'] or 'untagged'} in Lever. The pinned date "
+                      f"wins. Remove the pin or retag the role.")
     for roles in open_positions_grouped.values():
         for r in roles:
             if r["tier"] == "P0" and not r.get("created") and r["id"] not in P0_DATE_OVERRIDES:
