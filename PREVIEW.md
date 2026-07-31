@@ -2,10 +2,11 @@
 
 ## 📋 Recruiting Digest — Week of July 27, 2026
 
-_*TL;DR:* 18 in pipeline · 13 new this week_
+_*TL;DR:* 18 in pipeline · 1 offer out · 13 new this week_
 
 *🔄 What changed this week*
 • New candidates added: *13*
+• Offers out: *1*
 
 ---
 
@@ -14,9 +15,11 @@ _*TL;DR:* 18 in pipeline · 13 new this week_
 📞 Intro: *15*
 💻 Technical: *2*
 🏢 Onsite: *0*
-📋 Final Stages: *1*
-🎉 Offer: *0*
+📋 Final Stages: *0*
+🎉 Offer: *1*
 
+
+🎯 *1 offer(s) currently out!*
 
 ---
 
@@ -24,9 +27,9 @@ _*TL;DR:* 18 in pipeline · 13 new this week_
 
 *P0 — target close within ~1 month*
 ```
-BI Integration Engineer (BLR)        8   close Aug 31
-Backend Engineer (BLR)               4   close Aug 31
-Cloud Infrastructure Engineer (SF)   –   close Aug 31
+BI Integration Engineer (BLR)        8   close Aug 14
+Backend Engineer (BLR)               4   close Aug 24
+Cloud Infrastructure Engineer (SF)   –   close Aug 24
 ```
 
 *P1 — target close: end of quarter*
