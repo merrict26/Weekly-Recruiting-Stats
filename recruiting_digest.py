@@ -47,8 +47,24 @@ REFERRAL_URL = "https://hire.lever.co/referrals/new"
 # Fiscal year starts in February (Feb→Feb), so fiscal quarters end
 # Apr 30 / Jul 31 / Oct 31 / Jan 31.
 FISCAL_START_MONTH = 2
-# P0 = this many months from today. P1 = end of fiscal quarter (with runway).
+# P0 = this many months from the date the SEARCH OPENED (posting createdAt),
+# not from today — so the deadline is fixed and can actually go overdue.
+# P1 = end of fiscal quarter (with runway).
 P0_MONTHS = 1
+
+# Roles that were already open before the open-date rule existed, and so would
+# get a nonsense retroactive deadline. An entry here wins over every other rule,
+# including a due: tag.
+#
+# Keys may be either a Lever posting ID or an exact posting title. Posting IDs
+# are safer — a title key silently stops applying if anyone renames the role in
+# Lever. Swap these for the IDs in the last column of ROLES.md when convenient.
+# Delete an entry once the role closes; a key matching nothing warns each run.
+P0_DATE_OVERRIDES = {
+    "BI Integration Engineer": date(2026, 8, 14),
+    "Backend Engineer": date(2026, 8, 24),
+    "Cloud Infrastructure Engineer": date(2026, 8, 24),
+}
 # If the current quarter ends within this many days, P1 rolls to next quarter
 # (so a freshly-prioritized role isn't handed an unrealistic deadline).
 P1_RUNWAY_DAYS = 30
@@ -163,12 +179,37 @@ def next_fiscal_quarter_end(d):
     return fiscal_quarter_end(fiscal_quarter_end(d) + timedelta(days=1))
 
 
-def compute_target(tier, due, today):
-    """Target-close date for a role. Hard 'due' wins; else calendar rule by tier."""
+def opened_date(role):
+    """Date the search opened, from the Lever posting's createdAt (epoch ms)."""
+    created = role.get("created")
+    if not created:
+        return None
+    return date.fromtimestamp(created / 1000)
+
+
+def find_override(posting_id=None, title=None):
+    """Pinned close date for a role, by posting ID or exact title. None if unpinned."""
+    for key in (posting_id, title):
+        if key and key in P0_DATE_OVERRIDES:
+            return P0_DATE_OVERRIDES[key]
+    return None
+
+
+def compute_target(tier, due, today, opened=None, posting_id=None, title=None):
+    """Target-close date for a role.
+
+    Precedence: pinned override > due: tag > calendar rule by tier.
+    P0 counts P0_MONTHS from `opened` (the day the search opened). If the
+    posting has no createdAt, it falls back to `today` and the date rolls —
+    same as the old behaviour, but that case is now logged by main().
+    """
+    pinned = find_override(posting_id, title)
+    if pinned:
+        return pinned
     if due:
         return due
     if tier == "P0":
-        return add_months(today, P0_MONTHS)
+        return add_months(opened or today, P0_MONTHS)
     if tier == "P1":
         qend = fiscal_quarter_end(today)
         if (qend - today).days < P1_RUNWAY_DAYS:
@@ -412,7 +453,9 @@ def format_slack_message(data):
             rec = {
                 "label": f"{role['title']} ({loc})" if loc else role["title"],
                 "count": data["pipeline_per_role"].get(role["id"], 0),
-                "close": compute_target(tier, role.get("due"), today_d),
+                "close": compute_target(tier, role.get("due"), today_d,
+                                        opened=opened_date(role),
+                                        posting_id=role.get("id"), title=role.get("title")),
             }
             (buckets[tier] if tier in buckets else other).append(rec)
 
@@ -513,11 +556,15 @@ def write_roles(open_positions_grouped, today_d):
     for group, roles in open_positions_grouped.items():
         for r in roles:
             tier = r.get("tier") or "—"
-            close = compute_target(r.get("tier"), r.get("due"), today_d)
+            opened = opened_date(r)
+            close = compute_target(r.get("tier"), r.get("due"), today_d,
+                                   opened=opened, posting_id=r.get("id"), title=r.get("title"))
             close_str = fmt(close)
             if close and close < today_d:
                 close_str += " (overdue)"
-            started = date.fromtimestamp(r["created"] / 1000).strftime("%Y-%m-%d") if r.get("created") else "(unknown)"
+            if find_override(r.get("id"), r.get("title")):
+                close_str += " [pinned]"
+            started = opened.strftime("%Y-%m-%d") if opened else "(unknown)"
             lines.append(
                 f"| {r['title']} | {group} | {r.get('location','')} | {tier} | "
                 f"{started} | {close_str} | {r.get('url','') or '(none)'} | {r['id']} |"
@@ -578,6 +625,24 @@ def main():
     for group in open_positions_by_dept:
         open_positions_by_dept[group].sort(key=lambda x: x["title"])
     open_positions_grouped = dict(sorted(open_positions_by_dept.items()))
+
+    # Housekeeping warnings — surfaced in the run log, never in the Slack post.
+    live_keys = {p.get("id") for p in postings} | {p.get("text") for p in postings}
+    for stale in sorted(set(P0_DATE_OVERRIDES) - live_keys):
+        print(f"⚠ P0_DATE_OVERRIDES key '{stale}' matches no open posting — "
+              f"role closed, or the title was changed in Lever. Its pinned date "
+              f"is being ignored. Fix or remove it in recruiting_digest.py.")
+    for key in P0_DATE_OVERRIDES:
+        dupes = [p for p in postings if p.get("text") == key]
+        if len(dupes) > 1:
+            print(f"⚠ P0_DATE_OVERRIDES key '{key}' matches {len(dupes)} open "
+                  f"postings; all of them get the pinned date. Use posting IDs "
+                  f"instead: {', '.join(p.get('id','?') for p in dupes)}")
+    for roles in open_positions_grouped.values():
+        for r in roles:
+            if r["tier"] == "P0" and not r.get("created") and r["id"] not in P0_DATE_OVERRIDES:
+                print(f"⚠ P0 role '{r['title']}' has no createdAt; its target "
+                      f"date will roll forward each week instead of holding.")
 
     data = {
         "new_candidates": new_candidates,
