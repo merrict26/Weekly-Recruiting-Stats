@@ -2,7 +2,7 @@ name: Weekly Recruiting Digest
 
 on:
   schedule:
-  
+  cron: '30 23 * * 5'
   # Allow manual trigger for testing
   workflow_dispatch:
 
