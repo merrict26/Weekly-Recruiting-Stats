@@ -9,8 +9,13 @@ Scalable model — nothing role-specific is hardcoded:
   • Target-close dates are computed by calendar rule (see TARGET RULES below),
     so they roll forward on their own — no edits when a month/quarter turns.
   • A hard deadline can override the rule with a tag "due:YYYY-MM-DD".
-"""
 
+Run modes:
+  DRY_RUN=1             render PREVIEW.md / ROLES.md, post nothing anywhere
+  DIGEST_MODE=preview   post to SLACK_PREVIEW_WEBHOOK_URL with a PREVIEW banner
+  DIGEST_MODE=publish   post to SLACK_WEBHOOK_URL (the public channel)
+Default is preview: publishing requires asking for it explicitly.
+"""
 import os
 import calendar
 import requests
@@ -20,6 +25,12 @@ from collections import defaultdict
 # === CONFIG ===
 LEVER_API_KEY = os.environ["LEVER_API_KEY"]
 SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL", "")
+SLACK_PREVIEW_WEBHOOK_URL = os.environ.get("SLACK_PREVIEW_WEBHOOK_URL", "")
+
+# "publish" -> public channel. Anything else -> pvt-recruiting-preview.
+# Defaults to preview so a missing or typo'd value can never publish.
+DIGEST_MODE = os.environ.get("DIGEST_MODE", "preview")
+
 # When DRY_RUN is set, render to PREVIEW.md / ROLES.md instead of posting to Slack.
 DRY_RUN = bool(os.environ.get("DRY_RUN"))
 
@@ -105,7 +116,6 @@ STAGE_EMOJI = {
 # ----------------------------------------------------------------------------
 # Tag parsing + date rules
 # ----------------------------------------------------------------------------
-
 def parse_tier(tags):
     """Return 'P0'/'P1'/'P2' from a posting's Lever tags, or None if untagged."""
     for t in tags or []:
@@ -170,7 +180,6 @@ def compute_target(tier, due, today):
 # ----------------------------------------------------------------------------
 # Lever API
 # ----------------------------------------------------------------------------
-
 def shorten_location(location):
     if not location:
         return ""
@@ -253,6 +262,9 @@ def get_candidates_added_since(opportunities, since_date):
 
 
 def get_onsites_this_week(opportunities, since_date):
+    # NOTE: since_date is currently unused — this counts everyone sitting in an
+    # onsite stage right now, not onsites scheduled this week. The result is not
+    # rendered anywhere today. Left as-is deliberately; see the notes in chat.
     return sum(1 for opp in opportunities if get_stage_id(opp) in ONSITE_STAGE_IDS)
 
 
@@ -308,7 +320,6 @@ def get_candidates_in_stages(opportunities, stage_ids, postings_map):
 # ----------------------------------------------------------------------------
 # Rendering
 # ----------------------------------------------------------------------------
-
 def build_tldr(data):
     parts = [f"{data['total_active']} in pipeline"]
     offers = data["by_group"].get("Offer", 0)
@@ -410,6 +421,7 @@ def format_slack_message(data):
             blocks.append({"type": "section",
                            "text": {"type": "mrkdwn",
                                     "text": render_bucket(TIER_HEADER[t], buckets[t], today_d, show_close=(t != "P2"))}})
+
     if other:
         blocks.append({"type": "section",
                        "text": {"type": "mrkdwn",
@@ -427,13 +439,43 @@ def format_slack_message(data):
     blocks.append({"type": "context",
                    "elements": [{"type": "mrkdwn",
                                  "text": f"Total active candidates: {data['total_active']}  ·  Referral bonus: $10,000 / ₹5 lakh"}]})
+
     return {"blocks": blocks}
 
 
+def add_preview_banner(message):
+    """Prepend a banner so a preview is never mistaken for the real post."""
+    banner = {
+        "type": "context",
+        "elements": [{
+            "type": "mrkdwn",
+            "text": (":eyes: *PREVIEW — not yet posted publicly.* This goes to "
+                     "the team channel at 4:30 PM PT. Fix Lever tags now if "
+                     "anything below looks wrong."),
+        }],
+    }
+    return {**message, "blocks": [banner, {"type": "divider"}, *message["blocks"]]}
+
+
 def post_to_slack(message):
-    response = requests.post(SLACK_WEBHOOK_URL, json=message)
+    if DIGEST_MODE == "publish":
+        webhook, label = SLACK_WEBHOOK_URL, "public channel"
+    else:
+        # Fail loudly rather than quietly falling back to the public webhook.
+        if not SLACK_PREVIEW_WEBHOOK_URL:
+            raise SystemExit(
+                "DIGEST_MODE=preview but SLACK_PREVIEW_WEBHOOK_URL is unset. "
+                "Refusing to send a preview to the public webhook."
+            )
+        webhook, label = SLACK_PREVIEW_WEBHOOK_URL, "pvt-recruiting-preview"
+        message = add_preview_banner(message)
+
+    if not webhook:
+        raise SystemExit(f"No webhook configured for DIGEST_MODE={DIGEST_MODE}")
+
+    response = requests.post(webhook, json=message)
     response.raise_for_status()
-    print("✅ Posted to Slack successfully")
+    print(f"✅ Posted to Slack successfully ({label}, mode={DIGEST_MODE})")
 
 
 def write_preview(message):
@@ -486,9 +528,11 @@ def write_roles(open_positions_grouped, today_d):
 
 
 def main():
+    print(f"Mode: {'DRY_RUN (posts nowhere)' if DRY_RUN else DIGEST_MODE}")
     print("Fetching data from Lever...")
     opportunities = get_all_opportunities()
     print(f"Found {len(opportunities)} active candidates")
+
     postings = get_open_postings()
     print(f"Found {len(postings)} open positions")
 
@@ -510,7 +554,6 @@ def main():
     onsite_candidates = get_candidates_in_stages(opportunities, ONSITE_STAGE_IDS, postings_map)
     final_candidates = get_candidates_in_stages(opportunities, FINAL_STAGE_IDS, postings_map)
     offer_candidates = get_candidates_in_stages(opportunities, [OFFER_STAGE_ID], postings_map)
-
     pipeline_per_role = count_pipeline_per_role(opportunities)
 
     open_positions_by_dept = defaultdict(list)
@@ -550,6 +593,7 @@ def main():
     }
 
     message = format_slack_message(data)
+
     if DRY_RUN:
         write_preview(message)
         write_roles(open_positions_grouped, today_d)
