@@ -1,31 +1,62 @@
-name: Weekly Recruiting Digest
+# --- recruiting_digest.py patch -------------------------------------------
+# Add near the top, with the other os.environ reads.
 
-on:
-  schedule:
-  cron: '30 23 * * 5'
-  # Allow manual trigger for testing
-  workflow_dispatch:
+import json
+import os
+import sys
 
-jobs:
-  post-digest:
-    runs-on: ubuntu-latest
-    
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-      
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.11'
-      
-      - name: Install dependencies
-        run: |
-          pip install requests
-      
-      - name: Run recruiting digest
-        env:
-          LEVER_API_KEY: ${{ secrets.LEVER_API_KEY }}
-          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
-        run: |
-          python recruiting_digest.py
+# "publish" -> public channel. "preview" -> private channel. "dryrun" -> nowhere.
+DIGEST_MODE = os.environ.get("DIGEST_MODE", "preview")
+SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL")
+SLACK_PREVIEW_WEBHOOK_URL = os.environ.get("SLACK_PREVIEW_WEBHOOK_URL")
+
+
+# --- replace the existing post_to_slack() with this ------------------------
+
+def post_to_slack(message):
+    """Post the digest to the public channel, or to Caleb's preview channel."""
+    if DIGEST_MODE == "dryrun":
+        # Sends nothing anywhere. Renders the exact payload into the Actions log
+        # so you can eyeball formatting with zero chance of hitting a channel.
+        print("=== DRY RUN — no Slack request will be made ===")
+        print(json.dumps(_add_preview_banner(message), indent=2))
+        return None
+
+    if DIGEST_MODE == "publish":
+        webhook = SLACK_WEBHOOK_URL
+    else:
+        # Fail loudly rather than quietly posting a draft to the public channel.
+        if not SLACK_PREVIEW_WEBHOOK_URL:
+            sys.exit(
+                "DIGEST_MODE=preview but SLACK_PREVIEW_WEBHOOK_URL is unset. "
+                "Refusing to send a preview to the public webhook."
+            )
+        webhook = SLACK_PREVIEW_WEBHOOK_URL
+        message = _add_preview_banner(message)
+
+    response = requests.post(webhook, json=message)
+    response.raise_for_status()
+    return response
+
+
+def _add_preview_banner(message):
+    """Prepend a header block so the preview is never mistaken for the real post."""
+    banner = {
+        "type": "context",
+        "elements": [
+            {
+                "type": "mrkdwn",
+                "text": (
+                    ":eyes: *PREVIEW* — this goes out to the public channel at "
+                    "4:30 PM PT. Edit the source data now if something looks wrong."
+                ),
+            }
+        ],
+    }
+    # Block Kit payload
+    if isinstance(message, dict) and "blocks" in message:
+        return {**message, "blocks": [banner, {"type": "divider"}, *message["blocks"]]}
+    # Plain {"text": ...} payload
+    if isinstance(message, dict) and "text" in message:
+        return {**message, "text": "*[PREVIEW — publishes 4:30 PM PT]*\n\n" + message["text"]}
+    return message
