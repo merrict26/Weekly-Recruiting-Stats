@@ -1,62 +1,58 @@
-# --- recruiting_digest.py patch -------------------------------------------
-# Add near the top, with the other os.environ reads.
+name: Weekly Recruiting Digest
 
-import json
-import os
-import sys
+on:
+  schedule:
+    # GitHub cron is always UTC and does not follow DST.
+    # PDT: 3:30 PM / 4:30 PM PT.  PST (Nov-Mar): 2:30 PM / 3:30 PM PT.
+    - cron: '30 22 * * 5'   # preview  -> pvt-recruiting-preview
+    - cron: '30 23 * * 5'   # publish  -> public channel
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'dryrun = files only, posts nowhere'
+        required: false
+        default: 'dryrun'
+        type: choice
+        options:
+          - dryrun
+          - preview
+          - publish
 
-# "publish" -> public channel. "preview" -> private channel. "dryrun" -> nowhere.
-DIGEST_MODE = os.environ.get("DIGEST_MODE", "preview")
-SLACK_WEBHOOK_URL = os.environ.get("SLACK_WEBHOOK_URL")
-SLACK_PREVIEW_WEBHOOK_URL = os.environ.get("SLACK_PREVIEW_WEBHOOK_URL")
+jobs:
+  post-digest:
+    runs-on: ubuntu-latest
 
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-# --- replace the existing post_to_slack() with this ------------------------
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
 
-def post_to_slack(message):
-    """Post the digest to the public channel, or to Caleb's preview channel."""
-    if DIGEST_MODE == "dryrun":
-        # Sends nothing anywhere. Renders the exact payload into the Actions log
-        # so you can eyeball formatting with zero chance of hitting a channel.
-        print("=== DRY RUN — no Slack request will be made ===")
-        print(json.dumps(_add_preview_banner(message), indent=2))
-        return None
+      - name: Install dependencies
+        run: |
+          pip install requests
 
-    if DIGEST_MODE == "publish":
-        webhook = SLACK_WEBHOOK_URL
-    else:
-        # Fail loudly rather than quietly posting a draft to the public channel.
-        if not SLACK_PREVIEW_WEBHOOK_URL:
-            sys.exit(
-                "DIGEST_MODE=preview but SLACK_PREVIEW_WEBHOOK_URL is unset. "
-                "Refusing to send a preview to the public webhook."
-            )
-        webhook = SLACK_PREVIEW_WEBHOOK_URL
-        message = _add_preview_banner(message)
+      - name: Run recruiting digest
+        env:
+          LEVER_API_KEY: ${{ secrets.LEVER_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_PREVIEW_WEBHOOK_URL: ${{ secrets.SLACK_PREVIEW_WEBHOOK_URL }}
+          # Only the 23:30 cron publishes. Every other path previews or dry-runs.
+          DIGEST_MODE: ${{ github.event.schedule == '30 23 * * 5' && 'publish' || inputs.mode || 'preview' }}
+          # Empty string is falsy for the script's bool(os.environ.get(...)) check.
+          DRY_RUN: ${{ inputs.mode == 'dryrun' && '1' || '' }}
+        run: |
+          python recruiting_digest.py
 
-    response = requests.post(webhook, json=message)
-    response.raise_for_status()
-    return response
-
-
-def _add_preview_banner(message):
-    """Prepend a header block so the preview is never mistaken for the real post."""
-    banner = {
-        "type": "context",
-        "elements": [
-            {
-                "type": "mrkdwn",
-                "text": (
-                    ":eyes: *PREVIEW* — this goes out to the public channel at "
-                    "4:30 PM PT. Edit the source data now if something looks wrong."
-                ),
-            }
-        ],
-    }
-    # Block Kit payload
-    if isinstance(message, dict) and "blocks" in message:
-        return {**message, "blocks": [banner, {"type": "divider"}, *message["blocks"]]}
-    # Plain {"text": ...} payload
-    if isinstance(message, dict) and "text" in message:
-        return {**message, "text": "*[PREVIEW — publishes 4:30 PM PT]*\n\n" + message["text"]}
-    return message
+      - name: Upload dry-run output
+        if: ${{ inputs.mode == 'dryrun' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-preview
+          path: |
+            PREVIEW.md
+            ROLES.md
+          if-no-files-found: error
