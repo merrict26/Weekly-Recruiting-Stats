@@ -24,8 +24,13 @@ on:
           - publish
 
 permissions:
-  contents: read
+  contents: write      # commits role_state.json so reopens are detected
   actions: read        # lets the scheduled publish read its own run history
+
+# Two runs an hour apart both touch role_state.json. Never let them overlap.
+concurrency:
+  group: recruiting-digest
+  cancel-in-progress: false
 
 jobs:
   post-digest:
@@ -58,6 +63,26 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python recruiting_digest.py
+
+      - name: Persist reopen tracking
+        if: ${{ inputs.mode != 'dryrun' }}
+        run: |
+          if [[ -z "$(git status --porcelain role_state.json)" ]]; then
+            echo "role_state.json unchanged — nothing to commit."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add role_state.json
+          git commit -m "chore(digest): update role state [skip ci]"
+          # Another run may have pushed since checkout; rebase rather than fail.
+          for i in 1 2 3; do
+            git pull --rebase --autostash && git push && exit 0
+            echo "push attempt $i failed, retrying..."
+            sleep 5
+          done
+          echo "::warning::Could not push role_state.json. Reopen tracking will \
+          re-derive next run; the digest itself posted fine."
 
       - name: Upload dry-run output
         if: ${{ inputs.mode == 'dryrun' }}
