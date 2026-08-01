@@ -553,16 +553,27 @@ def render_candidate_lines(candidates):
     return text
 
 
+def format_close(d, today):
+    """'Aug 14' for this year, 'Sep 26, 2025' otherwise.
+
+    Without the year a stale date reads as a future one — 'Sep 26' looked like
+    next month when it was actually last year, and overdue.
+    """
+    return d.strftime("%b %d") if d.year == today.year else d.strftime("%b %d, %Y")
+
+
 def render_bucket(header, recs, today, show_close):
     """recs: list of dicts {label, count, close}. Aligned monospace block."""
     recs.sort(key=lambda r: (r["close"] or date(9999, 1, 1), r["label"]))
     width = max((len(r["label"]) for r in recs), default=0)
+    counts = [str(r["count"]) if r["count"] > 0 else "–" for r in recs]
+    # Right-align on the widest count, or a two-digit pipeline shifts the row.
+    cwidth = max((len(c) for c in counts), default=1)
     body = header + "\n```\n"
-    for r in recs:
-        count_str = str(r["count"]) if r["count"] > 0 else "–"
-        line = f"{r['label']:<{width}}   {count_str:>1}"
+    for r, count_str in zip(recs, counts):
+        line = f"{r['label']:<{width}}   {count_str:>{cwidth}}"
         if show_close and r["close"]:
-            line += "   close " + r["close"].strftime("%b %d")
+            line += "   close " + format_close(r["close"], today)
             if r["close"] < today:
                 line += "  ⚠ overdue"
         body += line + "\n"
@@ -928,6 +939,27 @@ def main():
                     if s.startswith(prefix) and parser([tag]) is None:
                         print(f"⚠ '{r['title']}' has tag '{tag}' but the date could "
                               f"not be read. Expected {prefix}YYYY-MM-DD. Ignoring it.")
+
+    # A P0 whose clock has never been observed to reset, and whose target is
+    # already past, is almost always a role promoted to P0 before tracking
+    # existed — the date is its posting birthday, not its promotion date.
+    for roles in open_positions_grouped.values():
+        for r in roles:
+            if r["tier"] != "P0":
+                continue
+            if find_override(r.get("id"), r.get("title"), r.get("location", "")):
+                continue
+            if parse_opened(r.get("tags")) or r.get("opened_reason") != "created":
+                continue
+            close = compute_target(r["tier"], r.get("due"), today_d,
+                                   opened=opened_date(r), posting_id=r.get("id"),
+                                   title=r.get("title"), location=r.get("location", ""))
+            if close and close < today_d:
+                print(f"⚠ '{r['title']}' is P0 with a target of {close}, already "
+                      f"past. That date came from the posting's creation date "
+                      f"({opened_date(r)}), so this role was likely promoted to P0 "
+                      f"before tracking saw it. Add tag 'opened:YYYY-MM-DD' in "
+                      f"Lever with the promotion date to restart the clock.")
 
     for roles in open_positions_grouped.values():
         for r in roles:
