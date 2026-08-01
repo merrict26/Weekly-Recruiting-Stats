@@ -1,5 +1,10 @@
 name: Weekly Recruiting Digest
 
+# The mode is embedded in the run title so a scheduled publish can look back
+# through run history and detect an earlier manual publish. Do not change the
+# "[<mode>]" shape without updating recent_manual_publish() in the script.
+run-name: Recruiting digest [${{ github.event.schedule == '30 23 * * 5' && 'publish' || inputs.mode || 'preview' }}]
+
 on:
   schedule:
     # GitHub cron is always UTC and does not follow DST.
@@ -17,6 +22,10 @@ on:
           - dryrun
           - preview
           - publish
+
+permissions:
+  contents: read
+  actions: read        # lets the scheduled publish read its own run history
 
 jobs:
   post-digest:
@@ -44,6 +53,9 @@ jobs:
           DIGEST_MODE: ${{ github.event.schedule == '30 23 * * 5' && 'publish' || inputs.mode || 'preview' }}
           # Empty string is falsy for the script's bool(os.environ.get(...)) check.
           DRY_RUN: ${{ inputs.mode == 'dryrun' && '1' || '' }}
+          # Only a cron run stands down for an earlier manual publish.
+          IS_SCHEDULED: ${{ github.event_name == 'schedule' }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           python recruiting_digest.py
 
