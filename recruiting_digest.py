@@ -509,6 +509,21 @@ def count_pipeline_per_role(opportunities):
     return counts
 
 
+def count_offers_per_role(opportunities):
+    """Candidates sitting at the offer stage, per posting.
+
+    A subset of count_pipeline_per_role — the offer stage is itself a tracked
+    stage, so these candidates are counted in that role's pipeline number too.
+    """
+    counts = defaultdict(int)
+    for opp in opportunities:
+        if get_stage_id(opp) == OFFER_STAGE_ID:
+            pid = get_opp_posting_id(opp)
+            if pid:
+                counts[pid] += 1
+    return counts
+
+
 def get_candidate_details(opportunity, postings_map):
     name = opportunity.get("name", "Unknown")
     linkedin_url = None
@@ -576,6 +591,9 @@ def render_bucket(header, recs, today, show_close):
             line += "   close " + format_close(r["close"], today)
             if r["close"] < today:
                 line += "  ⚠ overdue"
+        offers = r.get("offers", 0)
+        if offers:
+            line += f"   {offers} offer{'s' if offers != 1 else ''} out"
         body += line + "\n"
     body += "```"
     return body
@@ -623,7 +641,7 @@ def format_slack_message(data):
     blocks.append({"type": "divider"})
     blocks.append({"type": "section",
                    "text": {"type": "mrkdwn",
-                            "text": f"*🧩 Open roles ({data['total_open_positions']})*  ·  _count = in active pipeline · close = target fill date_"}})
+                            "text": f"*🧩 Open roles ({data['total_open_positions']})*  ·  _count = in active pipeline (includes offers) · close = target fill date_"}})
 
     # Bucket by tier (from Lever tags); untagged -> Unprioritized.
     buckets = {t: [] for t in TIER_ORDER}
@@ -635,6 +653,7 @@ def format_slack_message(data):
             rec = {
                 "label": f"{role['title']} ({loc})" if loc else role["title"],
                 "count": data["pipeline_per_role"].get(role["id"], 0),
+                "offers": data["offers_per_role"].get(role["id"], 0),
                 "close": compute_target(tier, role.get("due"), today_d,
                                         opened=opened_date(role), posting_id=role.get("id"),
                                         title=role.get("title"), location=role.get("location", "")),
@@ -862,6 +881,7 @@ def main():
     final_candidates = get_candidates_in_stages(opportunities, FINAL_STAGE_IDS, postings_map)
     offer_candidates = get_candidates_in_stages(opportunities, [OFFER_STAGE_ID], postings_map)
     pipeline_per_role = count_pipeline_per_role(opportunities)
+    offers_per_role = count_offers_per_role(opportunities)
 
     # Detect reopens before building the role list, so dates reflect this run.
     state = load_state()
@@ -975,6 +995,7 @@ def main():
         "open_positions_grouped": open_positions_grouped,
         "total_open_positions": len(postings),
         "pipeline_per_role": pipeline_per_role,
+        "offers_per_role": offers_per_role,
         "onsite_candidates": onsite_candidates,
         "final_candidates": final_candidates,
         "offer_candidates": offer_candidates,
