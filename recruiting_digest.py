@@ -19,7 +19,7 @@ Default is preview: publishing requires asking for it explicitly.
 import os
 import calendar
 import requests
-from datetime import datetime, timedelta, date
+from datetime import datetime, timedelta, date, timezone
 from collections import defaultdict
 
 # === CONFIG ===
@@ -34,6 +34,17 @@ DIGEST_MODE = os.environ.get("DIGEST_MODE", "preview")
 # When DRY_RUN is set, render to PREVIEW.md / ROLES.md instead of posting to Slack.
 DRY_RUN = bool(os.environ.get("DRY_RUN"))
 
+# True only when this run came from a cron schedule, not a manual dispatch.
+IS_SCHEDULED = os.environ.get("IS_SCHEDULED", "").lower() == "true"
+# If someone published early via the button, the 4:30 cron would post a second
+# copy. The scheduled publish checks run history and stands down if a manual
+# publish succeeded within this many hours. Manual publishes are never blocked.
+SKIP_IF_PUBLISHED_WITHIN_HOURS = 20
+
+# Bump when the date rules change. Stamped into PREVIEW.md / ROLES.md and the
+# run log so you can tell at a glance which version produced an output.
+DIGEST_VERSION = "2026-07-31 · open-date P0 + posting-ID pins"
+
 # === DISPLAY CONFIG ===
 # Counts-only by default — candidate names/LinkedIn stay in the private
 # #tmp-recruiting-<candidate> channels. Flip True only to list names.
@@ -42,6 +53,10 @@ SHOW_CANDIDATE_NAMES = False
 HOW_HIRING_WORKS_URL = "https://zaimler.atlassian.net/wiki/spaces/ZCH1/pages/1063288834/How+We+Hire"
 ROLE_LIBRARY_URL = "https://zaimler.atlassian.net/wiki/spaces/ZCH1/pages/1063354369/Open+Roles"
 REFERRAL_URL = "https://hire.lever.co/referrals/new"
+# Where the "Publish now" button in the preview points. Slack incoming webhooks
+# are one-way, so a button can only link out — it cannot trigger the run itself.
+GITHUB_ACTIONS_URL = ("https://github.com/merrict26/Weekly-Recruiting-Stats"
+                      "/actions/workflows/weekly-digest.yml")
 
 # === TARGET RULES ===
 # Fiscal year starts in February (Feb→Feb), so fiscal quarters end
@@ -501,17 +516,27 @@ def format_slack_message(data):
 
 
 def add_preview_banner(message):
-    """Prepend a banner so a preview is never mistaken for the real post."""
+    """Prepend a banner + publish button so a preview is never mistaken for the post."""
     banner = {
-        "type": "context",
-        "elements": [{
+        "type": "section",
+        "text": {
             "type": "mrkdwn",
-            "text": (":eyes: *PREVIEW — not yet posted publicly.* This goes to "
-                     "the team channel at 4:30 PM PT. Fix Lever tags now if "
-                     "anything below looks wrong."),
+            "text": (":eyes: *PREVIEW — not yet posted publicly.*\n"
+                     "This posts to the team channel automatically at 4:30 PM PT. "
+                     "Fix Lever tags now if anything below looks wrong, or publish "
+                     "early with the button → *Run workflow* → mode `publish`."),
+        },
+    }
+    publish = {
+        "type": "actions",
+        "elements": [{
+            "type": "button",
+            "text": {"type": "plain_text", "text": "🚀 Publish now", "emoji": True},
+            "url": GITHUB_ACTIONS_URL,
+            "style": "primary",
         }],
     }
-    return {**message, "blocks": [banner, {"type": "divider"}, *message["blocks"]]}
+    return {**message, "blocks": [banner, publish, {"type": "divider"}, *message["blocks"]]}
 
 
 def post_to_slack(message):
@@ -535,6 +560,54 @@ def post_to_slack(message):
     print(f"✅ Posted to Slack successfully ({label}, mode={DIGEST_MODE})")
 
 
+def recent_manual_publish():
+    """Timestamp of a recent successful manual publish, or None.
+
+    Reads this workflow's own run history via the GitHub API. Needs
+    `permissions: actions: read` and the run-name set in weekly-digest.yml.
+    Any failure returns None — the digest posts rather than silently skipping.
+    """
+    token = os.environ.get("GITHUB_TOKEN")
+    repo = os.environ.get("GITHUB_REPOSITORY")
+    this_run = os.environ.get("GITHUB_RUN_ID")
+    # "owner/repo/.github/workflows/weekly-digest.yml@refs/heads/main"
+    wf_ref = os.environ.get("GITHUB_WORKFLOW_REF", "")
+    wf_file = wf_ref.split("@")[0].split("/")[-1] if wf_ref else ""
+    if not (token and repo and wf_file):
+        print("ℹ No GitHub API context; skipping the duplicate-publish check.")
+        return None
+
+    url = f"https://api.github.com/repos/{repo}/actions/workflows/{wf_file}/runs"
+    try:
+        r = requests.get(
+            url,
+            headers={"Authorization": f"Bearer {token}",
+                     "Accept": "application/vnd.github+json"},
+            params={"event": "workflow_dispatch", "status": "success", "per_page": 30},
+            timeout=20,
+        )
+        r.raise_for_status()
+        runs = r.json().get("workflow_runs", [])
+    except Exception as e:                      # noqa: BLE001 — never block the post
+        print(f"⚠ Duplicate-publish check failed ({e}); posting anyway.")
+        return None
+
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=SKIP_IF_PUBLISHED_WITHIN_HOURS)
+    for run in runs:
+        if str(run.get("id")) == str(this_run):
+            continue
+        # run-name in the workflow embeds the mode, e.g. "Recruiting digest [publish]"
+        if "[publish]" not in (run.get("display_title") or run.get("name") or ""):
+            continue
+        finished = run.get("updated_at")
+        if not finished:
+            continue
+        when = datetime.fromisoformat(finished.replace("Z", "+00:00"))
+        if when >= cutoff:
+            return when
+    return None
+
+
 def write_preview(message):
     lines = []
     for b in message["blocks"]:
@@ -551,7 +624,8 @@ def write_preview(message):
             lines.append("**[ " + b["elements"][0]["text"]["text"] + " ]**")
     text = "\n\n".join(lines)
     with open("PREVIEW.md", "w") as f:
-        f.write("<!-- Live Lever preview generated by DRY_RUN — NOT posted to Slack -->\n\n")
+        f.write("<!-- Live Lever preview generated by DRY_RUN — NOT posted to Slack -->\n")
+        f.write(f"<!-- digest version: {DIGEST_VERSION} -->\n\n")
         f.write(text + "\n")
     print(text)
     print("\n[DRY_RUN] wrote PREVIEW.md — nothing posted to Slack")
@@ -563,6 +637,7 @@ def write_roles(open_positions_grouped, today_d):
 
     lines = [
         "<!-- Live Lever postings from DRY_RUN — source of truth for the Role Library -->",
+        f"<!-- digest version: {DIGEST_VERSION} -->",
         "",
         "| Role | Team | Location | Priority | Search started | Target close | Hosted URL | Posting ID |",
         "|---|---|---|---|---|---|---|---|",
@@ -590,7 +665,18 @@ def write_roles(open_positions_grouped, today_d):
 
 
 def main():
+    print(f"recruiting_digest version: {DIGEST_VERSION}")
     print(f"Mode: {'DRY_RUN (posts nowhere)' if DRY_RUN else DIGEST_MODE}")
+
+    # Stand down if someone already published early via the button.
+    if not DRY_RUN and DIGEST_MODE == "publish" and IS_SCHEDULED:
+        already = recent_manual_publish()
+        if already:
+            print(f"✋ Already published manually at {already:%Y-%m-%d %H:%M UTC} "
+                  f"(within {SKIP_IF_PUBLISHED_WITHIN_HOURS}h). Skipping the "
+                  f"scheduled post so the channel doesn't get it twice.")
+            return
+
     print("Fetching data from Lever...")
     opportunities = get_all_opportunities()
     print(f"Found {len(opportunities)} active candidates")
