@@ -1,0 +1,123 @@
+name: Weekly Recruiting Digest
+
+# The mode is embedded in the run title so a scheduled publish can look back
+# through run history and detect an earlier manual publish. Do not change the
+# "[<mode>]" shape without updating recent_manual_publish() in the script.
+run-name: Recruiting digest [${{ github.event.schedule == '30 23 * * 5' && 'publish' || inputs.mode || 'preview' }}]
+
+on:
+  schedule:
+    # GitHub cron is always UTC and does not follow DST.
+    # PDT: 3:30 PM / 4:30 PM PT.  PST (Nov-Mar): 2:30 PM / 3:30 PM PT.
+    - cron: '30 22 * * 5'   # preview  -> pvt-recruiting-preview
+    - cron: '30 23 * * 5'   # publish  -> public channel
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: 'dryrun = files only, posts nowhere'
+        required: false
+        default: 'dryrun'
+        type: choice
+        options:
+          - dryrun
+          - preview
+          - publish
+
+permissions:
+  contents: write      # commits role_state.json so reopens are detected
+  actions: read        # lets the scheduled publish read its own run history
+
+# Two runs an hour apart both touch role_state.json. Never let them overlap.
+concurrency:
+  group: recruiting-digest
+  cancel-in-progress: false
+
+jobs:
+  post-digest:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: |
+          pip install requests
+
+      - name: Run recruiting digest
+        env:
+          LEVER_API_KEY: ${{ secrets.LEVER_API_KEY }}
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+          SLACK_PREVIEW_WEBHOOK_URL: ${{ secrets.SLACK_PREVIEW_WEBHOOK_URL }}
+          # Only the 23:30 cron publishes. Every other path previews or dry-runs.
+          DIGEST_MODE: ${{ github.event.schedule == '30 23 * * 5' && 'publish' || inputs.mode || 'preview' }}
+          # Empty string is falsy for the script's bool(os.environ.get(...)) check.
+          DRY_RUN: ${{ inputs.mode == 'dryrun' && '1' || '' }}
+          # Only a cron run stands down for an earlier manual publish.
+          IS_SCHEDULED: ${{ github.event_name == 'schedule' }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          python recruiting_digest.py
+
+      # The digest has already posted by this point, so nothing here may fail
+      # the run: continue-on-error plus an explicit `exit 0` on every path.
+      - name: Persist reopen tracking
+        if: ${{ inputs.mode != 'dryrun' }}
+        continue-on-error: true
+        run: |
+          set +e
+          if [[ ! -f role_state.json ]]; then
+            echo "::warning::role_state.json was not written; skipping commit."
+            exit 0
+          fi
+          if [[ -z "$(git status --porcelain -- role_state.json)" ]]; then
+            echo "role_state.json unchanged — nothing to commit."
+            exit 0
+          fi
+          git config user.name  "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          git add -f -- role_state.json          # -f in case it is gitignored
+          if [[ $? -ne 0 ]]; then
+            echo "::warning::git add failed for role_state.json."; exit 0
+          fi
+          git commit -m "chore(digest): update role state [skip ci]"
+          if [[ $? -ne 0 ]]; then
+            echo "::warning::git commit failed (nothing staged?)."; exit 0
+          fi
+
+          branch="${GITHUB_REF_NAME:-main}"
+          for i in 1 2 3; do
+            git pull --rebase --autostash origin "$branch"
+            if [[ $? -ne 0 ]]; then
+              echo "pull attempt $i failed; aborting rebase and retrying"
+              git rebase --abort 2>/dev/null
+              sleep 5; continue
+            fi
+            git push origin "HEAD:$branch"
+            if [[ $? -eq 0 ]]; then
+              echo "role_state.json pushed to $branch"; exit 0
+            fi
+            echo "push attempt $i failed, retrying..."
+            sleep 5
+          done
+          echo "::warning::Could not push role_state.json to $branch. Reopen \
+          tracking re-derives from createdAt next run; the digest posted fine. \
+          Check branch protection on $branch and Settings > Actions > Workflow \
+          permissions (needs read and write)."
+          exit 0
+
+      - name: Upload dry-run output
+        if: ${{ inputs.mode == 'dryrun' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: digest-preview
+          path: |
+            PREVIEW.md
+            ROLES.md
+          if-no-files-found: error
