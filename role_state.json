@@ -32,6 +32,14 @@
       "tier": "P1",
       "title": "Software Engineer in Test"
     },
+    "28868c70-2d24-4446-9d9f-fa89f0649b02": {
+      "last_seen": "2026-08-13",
+      "opened": "2026-08-13",
+      "published": true,
+      "reason": "created",
+      "tier": "P0",
+      "title": "Data Infrastructure Engineer (Query Engine)"
+    },
     "31008cbb-9ba9-422b-89d9-5589a345f708": {
       "last_seen": "2026-08-13",
       "opened": "2025-11-04",
@@ -67,7 +75,7 @@
     "94418052-5c16-460d-8fe9-469cfe9a1ea9": {
       "last_seen": "2026-08-13",
       "opened": "2024-11-27",
-      "published": true,
+      "published": false,
       "reason": "created",
       "tier": "P0",
       "title": "Data Infrastructure Engineer (Query Engine)"
@@ -90,10 +98,10 @@
     },
     "eeec3f5d-b1e4-4d3b-b603-d5fdb1540ed8": {
       "last_seen": "2026-08-13",
-      "opened": "2025-12-04",
+      "opened": "2026-08-13",
       "published": true,
-      "reason": "created",
-      "tier": null,
+      "reason": "promoted",
+      "tier": "P0",
       "title": "Full Stack Engineer"
     }
   },
