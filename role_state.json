@@ -9,7 +9,7 @@
       "title": "BI Integration Engineer"
     },
     "0cac2143-7856-4913-9d6a-445066207c9c": {
-      "last_seen": "2026-10-03",
+      "last_seen": "2026-10-10",
       "opened": "2025-02-14",
       "published": true,
       "reason": "created",
@@ -17,7 +17,7 @@
       "title": "Cloud Infrastructure Engineer"
     },
     "10da0517-7829-4d29-b7ce-826aada95c9a": {
-      "last_seen": "2026-10-03",
+      "last_seen": "2026-10-10",
       "opened": "2026-08-01",
       "published": true,
       "reason": "promoted",
@@ -33,11 +33,11 @@
       "title": "Software Engineer in Test"
     },
     "28868c70-2d24-4446-9d9f-fa89f0649b02": {
-      "last_seen": "2026-10-03",
+      "last_seen": "2026-10-10",
       "opened": "2026-08-13",
       "published": true,
       "reason": "created",
-      "tier": "P0",
+      "tier": null,
       "title": "Data Infrastructure Engineer (Query Engine)"
     },
     "31008cbb-9ba9-422b-89d9-5589a345f708": {
@@ -49,15 +49,15 @@
       "title": "Backend Engineer"
     },
     "32f6f84b-96a7-4ac3-9d1a-8403c737312b": {
-      "last_seen": "2026-10-03",
+      "last_seen": "2026-10-10",
       "opened": "2026-01-20",
       "published": true,
       "reason": "created",
-      "tier": "P1",
+      "tier": null,
       "title": "Senior Security Engineer"
     },
     "5a208caa-1069-48b6-ab5f-a2391b2e8f8d": {
-      "last_seen": "2026-10-03",
+      "last_seen": "2026-10-10",
       "opened": "2026-09-18",
       "published": true,
       "reason": "created",
@@ -67,17 +67,17 @@
     "5dd55f48-9fdd-49c1-9d64-950ba5a43a21": {
       "last_seen": "2026-10-03",
       "opened": "2026-03-10",
-      "published": true,
+      "published": false,
       "reason": "created",
       "tier": "P1",
       "title": "Director of Marketing"
     },
     "6eac543e-74a9-4f00-a108-2f341df5bd07": {
-      "last_seen": "2026-10-03",
+      "last_seen": "2026-10-10",
       "opened": "2026-02-06",
       "published": true,
       "reason": "created",
-      "tier": "P1",
+      "tier": null,
       "title": "Head of Product"
     },
     "94418052-5c16-460d-8fe9-469cfe9a1ea9": {
@@ -89,15 +89,15 @@
       "title": "Data Infrastructure Engineer (Query Engine)"
     },
     "c4932cc1-5fba-4a80-92e4-15c4d0f30f96": {
-      "last_seen": "2026-10-03",
+      "last_seen": "2026-10-10",
       "opened": "2025-07-22",
       "published": true,
       "reason": "created",
-      "tier": "P1",
+      "tier": null,
       "title": "ML Infrastructure Engineer"
     },
     "d86dd3fc-eba8-4dd0-9aff-8f80de303878": {
-      "last_seen": "2026-10-03",
+      "last_seen": "2026-10-10",
       "opened": "2026-08-21",
       "published": true,
       "reason": "promoted",
@@ -105,22 +105,22 @@
       "title": "Forward Deployed Engineer"
     },
     "e2e564b4-acf2-454d-a479-4b54772bdfbc": {
-      "last_seen": "2026-10-03",
+      "last_seen": "2026-10-10",
       "opened": "2024-11-27",
       "published": true,
       "reason": "created",
-      "tier": "P2",
+      "tier": null,
       "title": "Staff Applied Machine Learning Engineer"
     },
     "eeec3f5d-b1e4-4d3b-b603-d5fdb1540ed8": {
-      "last_seen": "2026-10-03",
+      "last_seen": "2026-10-10",
       "opened": "2026-08-13",
       "published": true,
       "reason": "promoted",
-      "tier": "P0",
+      "tier": null,
       "title": "Full Stack Engineer"
     }
   },
-  "updated": "2026-10-03",
+  "updated": "2026-10-10",
   "version": 2
 }
